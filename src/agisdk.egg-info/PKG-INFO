@@ -8,7 +8,7 @@ Project-URL: Bug Tracker, https://github.com/agi-inc/agisdk/issues
 Project-URL: Documentation, https://github.com/agi-inc/agisdk
 Project-URL: Leaderboard, https://realevals.xyz
 Classifier: Programming Language :: Python :: 3
-Classifier: License :: OSI Approved :: MIT License
+Classifier: License :: OSI Approved :: Apache Software License
 Classifier: Operating System :: OS Independent
 Classifier: Development Status :: 4 - Beta
 Classifier: Intended Audience :: Developers
