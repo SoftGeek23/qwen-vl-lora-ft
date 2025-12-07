@@ -1,18 +1,53 @@
-results
-*.DS_Store
-*.pyc
-browser-use
-browseruse
-learnstagehand
-udrive
-build
-.trash
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Model checkpoints and cache
+*.ckpt
+*.safetensors
+*.bin
+*.pt
+*.pth
+qwen2_5_vl_lora_checkpoint/
+qwen2_5_vl_merged/
+*.pkl
+*.pkl.gz
+
+# Hugging Face cache (if local)
+.cache/
+.huggingface/
+
+# Results and logs
+results/
+*.log
+experiment.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
 # Environment variables
 .env
-*.env
-.env.*
+.env.local
 
-**/.claude/settings.local.json
-
-uv.lock
-example/leaderboard_example.py
+# Large datasets
+*.jsonl.bak
+*.csv
+*.parquet

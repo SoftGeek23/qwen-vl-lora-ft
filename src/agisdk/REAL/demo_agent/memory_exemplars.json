@@ -1,0 +1,53 @@
+[
+  {
+    "state": {
+      "url": "omnizon search page",
+      "key_elements": "search textbox (role=textbox), search button (role=button, type=button)",
+      "summary": "On search page with search input field and search button visible"
+    },
+    "action": "fill on button element",
+    "result": "failure: Element is not an <input>, <textarea>, <select> or [contenteditable]. Element is a button, not an input field.",
+    "reflection": "CRITICAL RULE: You can ONLY use fill() on elements with role='textbox', role='input', type='text', or type='textarea' - NEVER on elements with role='button' or type='button'. Before using fill(), ALWAYS check the accessibility tree to find the element with role='textbox' (the input field), not the element with role='button' (the search button). Buttons are for clicking only, textboxes are for typing."
+  },
+  {
+    "state": {
+      "url": "omnizon search page",
+      "key_elements": "search textbox (role=textbox), search button (role=button)",
+      "summary": "On search page, need to identify which element can accept text input"
+    },
+    "action": "fill on button element",
+    "result": "failure: Cannot fill button elements. Only textbox, input, textarea, or contenteditable elements accept text input.",
+    "reflection": "GENERAL RULE: Buttons (role=button, type=button) are for clicking ONLY - you CANNOT type text into them. Input fields (role=textbox, type=text, or element type=input/textarea) are for entering text. When you need to type text, you MUST find the element with role='textbox' in the accessibility tree - look for the word 'textbox' in the element description. Do NOT use the button element for typing."
+  },
+  {
+    "state": {
+      "url": "omnizon search page",
+      "key_elements": "search textbox (role=textbox), search button (role=button)",
+      "summary": "On search page, need to search for 'laptop'"
+    },
+    "action": "fill and click together in one step",
+    "result": "failure: Received a multi-action, only single-actions are allowed.",
+    "reflection": "CRITICAL: The system only allows ONE action per step. You cannot execute fill() and click() together. You must first execute fill() on the textbox element (with role=textbox), wait for it to complete, then in the NEXT step execute click() on the button element separately."
+  },
+  {
+    "state": {
+      "url": "omnizon search page",
+      "key_elements": "search textbox (role=textbox), search button (role=button)",
+      "summary": "On search page, need to enter search term"
+    },
+    "action": "fill on textbox element (role=textbox)",
+    "result": "success",
+    "reflection": "Correctly identified the element with role='textbox' in the accessibility tree and used fill() on it. This is the correct approach - always look for role='textbox' when you need to type text. After filling, the next step should be to click the button element (role=button) to submit."
+  },
+  {
+    "state": {
+      "url": "omnizon search page",
+      "key_elements": "search textbox (role=textbox) with text entered, search button (role=button)",
+      "summary": "Search input field has been filled, ready to submit"
+    },
+    "action": "click on button element (role=button)",
+    "result": "success",
+    "reflection": "After filling the textbox, clicking the button successfully submitted the search. The correct process: 1) fill() on textbox (role=textbox), 2) click() on button (role=button) in separate steps."
+  }
+]
+

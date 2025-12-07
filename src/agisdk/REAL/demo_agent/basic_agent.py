@@ -1,8 +1,10 @@
 import base64
 import dataclasses
 import io
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Literal, Optional
 
 import numpy as np
@@ -19,6 +21,46 @@ from agisdk.REAL.browsergym.utils.obs import (
 from ..logging import logger as rich_logger
 
 logger = logging.getLogger(__name__)
+
+
+def load_memory_exemplars() -> str:
+    """
+    Load memory exemplars from JSON file and format them for the prompt.
+    Returns empty string if file doesn't exist or can't be loaded.
+    """
+    try:
+        # Path relative to this file
+        exemplars_path = Path(__file__).parent / "memory_exemplars.json"
+        if not exemplars_path.exists():
+            return ""
+        
+        with open(exemplars_path, 'r') as f:
+            exemplars = json.load(f)
+        
+        if not exemplars:
+            return ""
+        
+        formatted = "## Relevant Examples from Past Experiences\n\n"
+        formatted += "Learn from these examples to avoid common mistakes:\n\n"
+        
+        for i, ex in enumerate(exemplars, 1):
+            formatted += f"### Example {i}\n"
+            formatted += f"**State:** {ex['state']['summary']}\n"
+            formatted += f"- URL: {ex['state']['url']}\n"
+            formatted += f"- Key elements: {ex['state']['key_elements']}\n"
+            formatted += f"**Action:** `{ex['action']}`\n"
+            formatted += f"**Result:** {ex['result']}\n"
+            formatted += f"**Reflection:** {ex['reflection']}\n\n"
+        
+        formatted += "Use these examples to guide your actions. Pay special attention to:\n"
+        formatted += "- Distinguishing between buttons (for clicking) and input fields (for typing)\n"
+        formatted += "- Only executing ONE action per step (no multiple actions together)\n"
+        formatted += "- Identifying the correct element type before using fill() or click()\n\n"
+        
+        return formatted
+    except Exception as e:
+        logger.warning(f"Failed to load memory exemplars: {e}")
+        return ""
 
 
 # Handling Screenshots
@@ -568,6 +610,19 @@ class DemoAgent(Agent):
                     }
                 )
 
+        # Inject memory exemplars before asking for next action
+        memory_exemplars = load_memory_exemplars()
+        if memory_exemplars:
+            logger.info("Memory exemplars loaded and injected into prompt")
+            user_msgs.append(
+                {
+                    "type": "text",
+                    "text": memory_exemplars,
+                }
+            )
+        else:
+            logger.warning("No memory exemplars loaded - check if memory_exemplars.json exists")
+
         # ask for the next action
         user_msgs.append(
             {
@@ -575,7 +630,7 @@ class DemoAgent(Agent):
                 "text": """\
                         # Next action
 
-                        You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, the current state of the page before deciding on your next action.
+                        You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, the current state of the page, and the examples above before deciding on your next action.
                         """,
             }
         )

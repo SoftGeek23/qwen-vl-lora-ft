@@ -1,0 +1,10 @@
+# Requirements for fine-tuning Qwen2.5-VL with LoRA
+torch>=2.0.0
+transformers>=4.37.0
+peft>=0.6.0
+datasets>=2.14.0
+accelerate>=0.24.0
+qwen-vl-utils>=0.0.8
+autoawq>=0.1.8  # Required for AWQ quantized models
+bitsandbytes>=0.41.0  # For quantization support if needed
+

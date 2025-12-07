@@ -143,6 +143,113 @@ To use models from other providers, set their respective API keys:
 export ANTHROPIC_API_KEY="your-anthropic-api-key"
 ```
 
+## 🖥️ Running Local Models with vLLM
+
+You can run local models using vLLM server. This is especially useful for vision-language models like Qwen2.5-VL.
+
+### Setting up vLLM Server
+
+1. **Install vLLM** (with vision support for vision-language models):
+
+```bash
+# For vision-language models like Qwen2.5-VL
+pip install "vllm[vision]>=0.6.0"
+
+# Or for standard models
+pip install vllm>=0.6.0
+```
+
+2. **Start the vLLM server**:
+
+For Qwen2.5-VL-32B-Instruct-AWQ (vision-language model):
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model Qwen/Qwen2.5-VL-32B-Instruct-AWQ \
+    --port 7999 \
+    --trust-remote-code \
+    --dtype auto
+```
+
+For standard text models:
+
+```bash
+python -m vllm.entrypoints.openai.api_server \
+    --model <model-name> \
+    --port 7999 \
+    --trust-remote-code \
+    --dtype auto
+```
+
+**Note:** The default port is `7999`. If you use a different port, you'll need to modify the `base_url` in the agent configuration.
+
+3. **Use the local model in your code**:
+
+```python
+from agisdk import REAL
+
+harness = REAL.harness(
+    model="local/Qwen/Qwen2.5-VL-32B-Instruct-AWQ",  # Prefix with "local/"
+    headless=True,
+    max_steps=25,
+    use_screenshot=True,
+    use_axtree=True,
+)
+
+print(harness.run())
+```
+
+The SDK will automatically connect to `http://localhost:7999/v1` when you use the `local/` prefix.
+
+### vLLM Server Options
+
+Common vLLM server options you might need:
+
+- `--port`: Port number (default: 8000, SDK expects 7999)
+- `--trust-remote-code`: Required for models with custom code
+- `--dtype`: Data type (`auto`, `float16`, `bfloat16`)
+- `--max-model-len`: Maximum sequence length
+- `--enforce-eager`: Use eager mode (useful for debugging)
+- `--gpu-memory-utilization`: GPU memory utilization (0.0-1.0)
+- `--tensor-parallel-size`: Number of tensor parallel replicas
+
+For AWQ quantized models, vLLM will automatically detect and use the quantization.
+
+### Running with Visible Browser (headless=False)
+
+If you want to see the browser window (`headless=False`), you need a display server. On headless Linux servers, you have several options:
+
+**Option 1: Use xvfb-run (Virtual Display)**
+```bash
+# Install xvfb if not already installed
+sudo apt-get install xvfb
+
+# Run your script with xvfb-run
+xvfb-run -a python starter.py
+```
+Note: This creates a virtual display, so the browser runs but you won't see it visually. Useful for debugging without a GUI.
+
+**Option 2: X11 Forwarding (if SSH'd in)**
+```bash
+# Connect with X11 forwarding enabled
+ssh -X user@server
+
+# Or with trusted X11 forwarding
+ssh -Y user@server
+
+# Then run normally
+python starter.py
+```
+
+**Option 3: Use VNC or Remote Desktop**
+Set up a VNC server or remote desktop environment on your server, then connect to view the desktop.
+
+**Option 4: Run on a machine with a display**
+If you have a local machine with a GUI, run the script there instead of on a headless server.
+
+**For headless servers without display access:**
+Simply use `headless=True` in your harness configuration - the browser will still work, you just won't see the window.
+
 ## 👁️ Observation Structure
 
 Your agent gets access to the following observation structure:
@@ -207,7 +314,7 @@ REAL.harness(
     task_id=1,                        # Run specific task ID within a type
 
     # Browser configuration
-    headless=False,                   # Whether to show the browser
+    headless=False,                   # Whether to show the browser (requires X server or xvfb-run)
     max_steps=25,                     # Maximum number of steps
     browser_dimensions=(1280, 720),   # Browser window dimensions
 
