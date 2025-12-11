@@ -631,6 +631,12 @@ class DemoAgent(Agent):
                         # Next action
 
                         You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, the current state of the page, and the examples above before deciding on your next action.
+
+                        IMPORTANT RULES:
+                        1. When you have completed the task and found information that needs to be communicated (such as describing a product, providing search results, or answering a question), you MUST use send_msg_to_user() to send a message describing what you found. Simply displaying information on the page is not enough - you need to explicitly send a message to complete the task. Do not use noop() when you have completed the task and have information to share.
+                        2. If you receive an error message, you MUST address it. Do not assume an action succeeded if you received an error. Retry the failed action or find an alternative approach.
+                        3. Only output ONE action per response. Do not include multiple action calls in a single response, even if they are separated by text. Each action must be in its own separate response.
+                        4. Verify that your actions have actually completed successfully before moving on to the next step. If an action fails, you must retry it.
                         """,
             }
         )
