@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fine-tuning script for Qwen2.5-VL-32B-Instruct-AWQ using PEFT (LoRA).
+Fine-tuning script for Gemma-3-27B-IT using PEFT (LoRA).
 
 This script fine-tunes the model on instruction-following examples while
 avoiding catastrophic forgetting through parameter-efficient fine-tuning.
@@ -23,8 +23,8 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from datasets import Dataset
 from transformers import (
-    Qwen2_5_VLForConditionalGeneration,
-    AutoProcessor,
+    AutoModelForCausalLM,
+    AutoTokenizer,
     TrainingArguments,
     Trainer,
     DataCollatorForLanguageModeling,
@@ -34,39 +34,27 @@ from peft import (
     get_peft_model,
     TaskType,
 )
-from qwen_vl_utils import process_vision_info
+from huggingface_hub import login as hf_login
 import logging
 import sys
-
-# Workaround: Prevent PEFT from trying to import AWQ code if autoawq is installed
-# This is needed because PEFT tries to auto-detect AWQ layers and import AWQ modules
-# even when using base models, causing import errors with deprecated AutoAWQ
-try:
-    import awq
-    # If autoawq is installed, we need to be careful
-    # PEFT will try to use it even for base models
-    logger = logging.getLogger(__name__)
-    logger.warning(
-        "⚠️  autoawq is installed. PEFT may try to use AWQ code even for base models.\n"
-        "   If you encounter AWQ import errors, try: pip uninstall autoawq -y\n"
-        "   (You can reinstall it later for inference with AWQ models)"
-    )
-except ImportError:
-    pass  # autoawq not installed, that's fine
+import os
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Hardcoded Hugging Face token (set this if token retrieval fails)
+HF_TOKEN = ""g
 
 
 @dataclass
 class ModelArguments:
     """Arguments for model configuration."""
     model_name: str = field(
-        default="Qwen/Qwen2.5-VL-32B-Instruct-AWQ",
+        default="google/gemma-3-27b-it",
         metadata={"help": "Model identifier from Hugging Face"}
     )
     output_dir: str = field(
-        default="./qwen2_5_vl_lora_checkpoint",
+        default="./gemma_lora_checkpoint",
         metadata={"help": "Output directory for the fine-tuned model"}
     )
     cache_dir: Optional[str] = field(
@@ -92,7 +80,7 @@ class LoraArguments:
     )
     target_modules: List[str] = field(
         default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-        metadata={"help": "Target modules for LoRA adaptation"}
+        metadata={"help": "Target modules for LoRA adaptation. For Gemma, these are the attention and MLP layers."}
     )
     bias: str = field(
         default="none",
@@ -114,7 +102,7 @@ def load_dataset(jsonl_path: str) -> Dataset:
     return Dataset.from_list(examples)
 
 
-def preprocess_function(examples: Dict, processor: AutoProcessor, max_length: int = 2048) -> Dict:
+def preprocess_function(examples: Dict, tokenizer: AutoTokenizer, max_length: int = 2048) -> Dict:
     """
     Preprocess examples for training.
     
@@ -129,7 +117,7 @@ def preprocess_function(examples: Dict, processor: AutoProcessor, max_length: in
     for messages in messages_list:
         # Use apply_chat_template to format the conversation
         # This handles system/user/assistant roles correctly
-        text = processor.apply_chat_template(
+        text = tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=False
@@ -137,9 +125,6 @@ def preprocess_function(examples: Dict, processor: AutoProcessor, max_length: in
         texts.append(text)
     
     # Tokenize all texts
-    # Note: Qwen2.5-VL processor uses tokenizer for text
-    tokenizer = processor.tokenizer
-    
     model_inputs = tokenizer(
         texts,
         padding=True,
@@ -161,41 +146,91 @@ def preprocess_function(examples: Dict, processor: AutoProcessor, max_length: in
     return model_inputs
 
 
-def setup_model_and_processor(
+def setup_model_and_tokenizer(
     model_args: ModelArguments,
     lora_args: LoraArguments,
-    device_map: str = "auto"
+    device_map: str = "auto",
+    token: Optional[str] = None
 ) -> tuple:
-    """Setup model, processor, and LoRA configuration."""
+    """Setup model, tokenizer, and LoRA configuration."""
     logger.info(f"Loading model: {model_args.model_name}")
     
-    # Check if user is trying to use AWQ model
-    is_awq = "awq" in model_args.model_name.lower()
-    if is_awq:
-        raise ValueError(
-            "❌ AWQ models cannot be used for fine-tuning due to AutoAWQ deprecation.\n"
-            "   Please use the base model instead:\n"
-            "   --model_name Qwen/Qwen2.5-VL-32B-Instruct\n\n"
-            "   After fine-tuning, you can use LoRA adapters with AWQ models for inference:\n"
-            "   See AWQ_INFERENCE_GUIDE.md for details."
-        )
+    # Get token: use provided, then hardcoded, then environment, then HfFolder
+    if token is None:
+        # Use hardcoded token if available (defined at module level, line 45)
+        if HF_TOKEN:
+            token = HF_TOKEN
+            logger.info("✅ Using hardcoded HF_TOKEN")
     
-    # Load processor
-    processor = AutoProcessor.from_pretrained(
+    if token is None:
+        token = os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN")
+        if token:
+            logger.info("✅ Found token from environment variable")
+    
+    if token is None:
+        try:
+            from huggingface_hub import HfFolder
+            token = HfFolder.get_token()
+            if token:
+                logger.info(f"✅ Found token from Hugging Face cache")
+        except Exception:
+            pass
+    
+    # CRITICAL: Set token as environment variable so transformers can find it
+    if token:
+        os.environ["HF_TOKEN"] = token
+        logger.info("✅ Set HF_TOKEN environment variable")
+    else:
+        raise ValueError("❌ No Hugging Face token found! Please set HF_TOKEN in the script or environment.")
+    
+    # Verify authentication
+    if token:
+        try:
+            from huggingface_hub import whoami
+            user = whoami(token=token)
+            logger.info(f"✅ Authenticated as: {user.get('name', 'unknown')}")
+        except Exception as e:
+            logger.warning(f"⚠️  Token verification failed: {e}")
+    else:
+        # Try to use existing login without explicit token
+        try:
+            from huggingface_hub import whoami
+            user = whoami()
+            logger.info(f"✅ Using existing Hugging Face authentication: {user.get('name', 'unknown')}")
+        except Exception:
+            logger.warning("⚠️  No Hugging Face token found. If model is gated, you may need to set HF_TOKEN environment variable or run 'huggingface-cli login'")
+    
+    # For gated models, we MUST pass the token explicitly
+    # If token is None, transformers might not use the cached token
+    load_kwargs = {
+        "cache_dir": model_args.cache_dir,
+        "trust_remote_code": True,
+    }
+    if token:
+        load_kwargs["token"] = token
+    else:
+        # Fallback: try use_auth_token for older transformers compatibility
+        load_kwargs["use_auth_token"] = True
+    
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(
         model_args.model_name,
-        cache_dir=model_args.cache_dir
+        **load_kwargs
     )
     
-    # Load model - use base model (not AWQ) for fine-tuning
-    dtype = torch.bfloat16  # Use bfloat16 for base models (better training stability)
+    # Set pad token if not set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     
-    logger.info("Loading base model (not quantized) for fine-tuning...")
-    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+    # Load model
+    dtype = torch.bfloat16  # Use bfloat16 for better training stability
+    
+    logger.info("Loading model for fine-tuning...")
+    model = AutoModelForCausalLM.from_pretrained(
         model_args.model_name,
         torch_dtype=dtype,
         device_map=device_map,
-        cache_dir=model_args.cache_dir,
-        trust_remote_code=True,
+        **load_kwargs
     )
     
     # Configure LoRA
@@ -208,51 +243,9 @@ def setup_model_and_processor(
         bias=lora_args.bias,
     )
     
-    # Check if model has AWQ layers (shouldn't happen with base model)
-    # This helps catch issues early
-    has_awq_layers = False
-    try:
-        for name, module in model.named_modules():
-            if hasattr(module, '__class__') and 'AWQ' in module.__class__.__name__:
-                has_awq_layers = True
-                logger.warning(f"Found AWQ layer: {name} ({module.__class__.__name__})")
-                break
-    except Exception:
-        pass  # Ignore errors during check
-    
-    if has_awq_layers:
-        raise ValueError(
-            "❌ Model appears to have AWQ layers. Base models should not have AWQ layers.\n"
-            "   Please ensure you're using: Qwen/Qwen2.5-VL-32B-Instruct (not -AWQ)\n"
-            "   AWQ models cannot be fine-tuned due to AutoAWQ deprecation."
-        )
-    
     # Apply LoRA
-    # Note: PEFT may try to detect AWQ layers and import AWQ code
-    # If autoawq is installed, this can cause import errors
     logger.info("Applying LoRA adapters...")
-    try:
-        model = get_peft_model(model, peft_config)
-    except ImportError as e:
-        if "awq" in str(e).lower() or "PytorchGELUTanh" in str(e):
-            raise ImportError(
-                "❌ PEFT is trying to use AWQ code which is incompatible with current transformers version.\n"
-                "   This happens because PEFT auto-detects and tries to import AWQ modules.\n\n"
-                "   SOLUTION: Temporarily uninstall autoawq for fine-tuning:\n"
-                "   pip uninstall autoawq -y\n\n"
-                "   You can reinstall it later for inference:\n"
-                "   pip install autoawq>=0.1.8\n\n"
-                f"   Original error: {e}"
-            ) from e
-        raise
-    except Exception as e:
-        if "awq" in str(e).lower():
-            raise RuntimeError(
-                "❌ Error applying LoRA - AWQ-related issue detected.\n"
-                "   Try uninstalling autoawq: pip uninstall autoawq -y\n"
-                f"   Original error: {e}"
-            ) from e
-        raise
+    model = get_peft_model(model, peft_config)
     
     # Critical: Enable training mode and ensure LoRA parameters are trainable
     model.train()
@@ -280,57 +273,36 @@ def setup_model_and_processor(
     
     if trainable_params == 0:
         raise ValueError(
-            "No trainable parameters found! LoRA adapters may not be properly configured. "
-            "This can happen with AWQ models - you need to use the non-quantized base model for fine-tuning."
+            "No trainable parameters found! LoRA adapters may not be properly configured."
         )
     
     logger.info(f"✅ Found {trainable_params:,} trainable parameters out of {total_params:,} total ({100*trainable_params/total_params:.2f}%)")
     
-    # Double-check: Verify at least some LoRA parameters are trainable
-    lora_trainable = sum(p.numel() for name, p in model.named_parameters() 
-                        if "lora" in name.lower() and p.requires_grad)
-    if lora_trainable == 0:
-        raise ValueError(
-            "No LoRA parameters are trainable! This will cause gradient errors. "
-            "Please check your PEFT/LoRA configuration."
-        )
-    logger.info(f"✅ Verified {lora_trainable:,} LoRA parameters are trainable")
-    
-    # Double-check: Verify at least some LoRA parameters are trainable
-    lora_trainable = sum(p.numel() for name, p in model.named_parameters() 
-                        if "lora" in name.lower() and p.requires_grad)
-    if lora_trainable == 0:
-        raise ValueError(
-            "No LoRA parameters are trainable! This will cause gradient errors. "
-            "Please check your PEFT/LoRA configuration."
-        )
-    logger.info(f"✅ Verified {lora_trainable:,} LoRA parameters are trainable")
-    
-    return model, processor
+    return model, tokenizer
 
 
 def main():
     """Main training function."""
     import argparse
     
-    parser = argparse.ArgumentParser(description="Fine-tune Qwen2.5-VL with LoRA")
+    parser = argparse.ArgumentParser(description="Fine-tune Gemma-3-27B-IT with LoRA")
     parser.add_argument(
         "--dataset_path",
         type=str,
-        default="./finetuning_dataset.jsonl",
+        default="./omnizon_strategy_examples.jsonl",
         help="Path to JSONL dataset file"
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./qwen2_5_vl_lora_checkpoint",
+        default="./gemma_lora_checkpoint",
         help="Output directory for checkpoints"
     )
     parser.add_argument(
         "--model_name",
         type=str,
-        default="Qwen/Qwen2.5-VL-32B-Instruct-AWQ",
-        help="Model name or path. Note: AWQ models may not support fine-tuning. Use base model 'Qwen/Qwen2.5-VL-32B-Instruct' if you encounter gradient issues."
+        default="google/gemma-3-27b-it",
+        help="Model name or path"
     )
     parser.add_argument(
         "--cache_dir",
@@ -404,29 +376,14 @@ def main():
         default=2048,
         help="Maximum sequence length"
     )
+    parser.add_argument(
+        "--hf_token",
+        type=str,
+        default=None,
+        help="Hugging Face token for accessing gated models. Can also set HF_TOKEN env var."
+    )
     
     args = parser.parse_args()
-    
-    # Determine cache directory - use /workspace if available (more space)
-    if args.cache_dir is None:
-        if os.path.exists("/workspace"):
-            cache_dir = "/workspace/.cache/huggingface"
-            os.makedirs(cache_dir, exist_ok=True)
-            logger.info(f"Using /workspace for model cache: {cache_dir}")
-        else:
-            cache_dir = None
-            logger.info("Using default Hugging Face cache location")
-    else:
-        cache_dir = args.cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        logger.info(f"Using specified cache directory: {cache_dir}")
-    
-    # Setup model arguments
-    model_args = ModelArguments(
-        model_name=args.model_name,
-        output_dir=args.output_dir,
-        cache_dir=cache_dir,
-    )
     
     # Determine cache directory - use /workspace if available (more space)
     if args.cache_dir is None:
@@ -459,21 +416,20 @@ def main():
     # Load dataset
     dataset = load_dataset(args.dataset_path)
     
-    # Setup model and processor
-    model, processor = setup_model_and_processor(model_args, lora_args)
+    # Setup model and tokenizer
+    model, tokenizer = setup_model_and_tokenizer(model_args, lora_args, token=args.hf_token)
     
     # Preprocess dataset
     logger.info("Preprocessing dataset...")
     tokenized_dataset = dataset.map(
-        lambda examples: preprocess_function(examples, processor, max_length=args.max_length),
+        lambda examples: preprocess_function(examples, tokenizer, max_length=args.max_length),
         batched=True,
         remove_columns=dataset.column_names,
     )
     
-    # Determine precision based on model type
-    is_awq_model = "awq" in args.model_name.lower()
-    use_fp16 = is_awq_model  # AWQ models may need fp16
-    use_bf16 = not is_awq_model  # Base models work better with bf16
+    # Use bfloat16 for Gemma
+    use_bf16 = True
+    use_fp16 = False
     
     # Training arguments
     training_args = TrainingArguments(
@@ -501,7 +457,7 @@ def main():
     
     # Data collator
     data_collator = DataCollatorForLanguageModeling(
-        tokenizer=processor.tokenizer,
+        tokenizer=tokenizer,
         mlm=False,  # Causal LM, not masked LM
     )
     
@@ -520,7 +476,7 @@ def main():
     # Save final model
     logger.info(f"Saving final model to {args.output_dir}")
     trainer.save_model()
-    processor.save_pretrained(args.output_dir)
+    tokenizer.save_pretrained(args.output_dir)
     
     logger.info("Training complete!")
 
