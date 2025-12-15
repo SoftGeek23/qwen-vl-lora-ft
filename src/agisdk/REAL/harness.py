@@ -173,6 +173,10 @@ class harness:
         run_name: str = None,
         model_id_name: str = None,
         system_message_handling: str = None,
+        use_memory: bool = False,
+        memory_dir: str = "./agent_memories",
+        memory_top_k: int = 3,
+        memory_embedding_model: str = "BAAI/bge-large-en-v1.5",
     ):
         """
         Initialize the harness with the provided configuration.
@@ -256,6 +260,10 @@ class harness:
                 use_axtree=use_axtree,
                 use_screenshot=use_screenshot,
                 system_message_handling=use_system_message_handling,
+                use_memory=use_memory,
+                memory_dir=memory_dir,
+                memory_top_k=memory_top_k,
+                memory_embedding_model=memory_embedding_model,
             )
         else:
             raise ValueError("Either model or agentargs must be provided")
@@ -331,6 +339,10 @@ class harness:
         # Create default results directory if it doesn't exist
         if not os.path.exists(results_dir):
             os.makedirs(results_dir)
+        
+        # Store memory configuration for later use in reflection
+        self.use_memory = use_memory
+        self.memory_dir = memory_dir
 
     def run(self, tasks: list[str] = None) -> dict[str, Any]:
         """
@@ -375,6 +387,10 @@ class harness:
 
         # Format and return results
         self._format_results(results)
+
+        # Reflect on results and update memory (sleep state)
+        if hasattr(self, 'use_memory') and self.use_memory and results:
+            self._reflect_and_update_memory(results)
 
         return results
 
@@ -736,6 +752,48 @@ class harness:
         )
 
         return results
+    
+    def _reflect_and_update_memory(self, results: dict[str, Any]):
+        """
+        Reflect on completed tasks and update memory index with insights.
+        
+        This is the "sleep state" - after tasks complete, analyze patterns
+        and add memories for future use.
+        """
+        try:
+            from agisdk.REAL.demo_agent.reflector_agent import ReflectorAgent
+            from agisdk.REAL.demo_agent.memory_index import MemoryIndex
+            
+            # Initialize memory index (shared with agent)
+            memory_index = MemoryIndex(
+                memory_dir=self.memory_dir,
+                embedding_model=getattr(self.agent_args, 'memory_embedding_model', 'BAAI/bge-large-en-v1.5'),
+                top_k=getattr(self.agent_args, 'memory_top_k', 3),
+            )
+            
+            # Create reflector agent
+            reflector = ReflectorAgent(memory_index=memory_index)
+            
+            # Collect task logs from results
+            task_logs = reflector.collect_task_logs(results, results_dir=self.results_dir)
+            
+            if not task_logs:
+                logger.info("No task logs to reflect on")
+                return
+            
+            # Reflect on logs and generate memory insights
+            new_memories = reflector.reflect_on_logs(task_logs)
+            
+            if new_memories:
+                # Add memories to the index (this saves them to JSONL)
+                reflector.update_memory_index(new_memories)
+                logger.info(f"Reflector added {len(new_memories)} new memory insights to index")
+            else:
+                logger.info("Reflector found no new insights to add")
+                
+        except Exception as e:
+            logger.warning(f"Failed to reflect and update memory: {e}")
+            # Don't fail the entire run if reflection fails
 
     def _run_single_task(
         self,

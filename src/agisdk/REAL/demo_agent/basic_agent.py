@@ -3,9 +3,11 @@ import dataclasses
 import io
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Literal, Optional
+# 3/10
 
 import numpy as np
 from PIL import Image
@@ -115,6 +117,64 @@ class DemoAgent(Agent):
     def update_last_observation(self, obs):
         """Store the last observation for metrics"""
         self.last_observation = obs
+    
+    def _extract_state_summary(self, obs: dict) -> str:
+        """Extract a textual summary of the current state for memory indexing."""
+        summary_parts = []
+        
+        # URL
+        if obs.get("url"):
+            summary_parts.append(f"URL: {obs['url']}")
+        
+        # Key elements from axtree (first 500 chars)
+        if obs.get("axtree_txt"):
+            axtree_snippet = obs["axtree_txt"][:500]
+            summary_parts.append(f"Page elements: {axtree_snippet}")
+        
+        # Last action error (if any) - important context
+        if obs.get("last_action_error"):
+            summary_parts.append(f"Last error: {obs['last_action_error'][:200]}")
+        
+        # Goal context
+        if obs.get("goal_object"):
+            goal_text = str(obs["goal_object"])
+            if len(goal_text) > 200:
+                goal_text = goal_text[:200] + "..."
+            summary_parts.append(f"Goal: {goal_text}")
+        
+        return " | ".join(summary_parts)
+    
+    def _get_task_type_from_obs(self, obs: dict) -> Optional[str]:
+        """Extract task type from observation if available."""
+        # Try to extract from URL or task_id
+        url = obs.get("url", "")
+        task_id = obs.get("task_id", "")
+        
+        if "omnizon" in url.lower() or "omnizon" in task_id.lower():
+            return "omnizon"
+        elif "dashdish" in url.lower() or "dashdish" in task_id.lower():
+            return "dashdish"
+        elif "staynb" in url.lower() or "staynb" in task_id.lower():
+            return "staynb"
+        # Add more task type detection as needed
+        
+        return None
+    
+    def _query_memory(self, query_text: str, task_type: Optional[str] = None) -> str:
+        """Query the memory index and return formatted results."""
+        if not self.use_memory or not self.memory_index:
+            return ""
+        
+        return self.memory_index.query_memory(query_text, task_type=task_type)
+    
+    def _detect_memory_query(self, action: str) -> Optional[str]:
+        """Detect if action contains a memory query request."""
+        # Look for query_memory("...") pattern
+        pattern = r'query_memory\s*\(\s*["\']([^"\']+)["\']\s*\)'
+        match = re.search(pattern, action, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return None
 
     def __init__(
         self,
@@ -131,6 +191,10 @@ class DemoAgent(Agent):
         openrouter_site_url: Optional[str] = None,
         openrouter_site_name: Optional[str] = None,
         anthropic_api_key: Optional[str] = None,
+        use_memory: bool = False,
+        memory_dir: str = "./agent_memories",
+        memory_top_k: int = 3,
+        memory_embedding_model: str = "BAAI/bge-large-en-v1.5",
     ) -> None:
         super().__init__()
         self.chat_mode = chat_mode
@@ -417,6 +481,24 @@ class DemoAgent(Agent):
 
         self.action_history = []
         self.last_observation = None
+        
+        # Memory system
+        self.use_memory = use_memory
+        self.memory_index = None
+        self.pending_memory_results = None
+        
+        if self.use_memory:
+            try:
+                from .memory_index import MemoryIndex
+                self.memory_index = MemoryIndex(
+                    memory_dir=memory_dir,
+                    embedding_model=memory_embedding_model,
+                    top_k=memory_top_k,
+                )
+                logger.info(f"Memory index initialized with {len(self.memory_index.memories)} existing memories")
+            except Exception as e:
+                logger.warning(f"Failed to initialize memory index: {e}")
+                self.use_memory = False
 
     def get_action(self, obs: dict) -> tuple[str, dict]:
         # Print task start information if this is the first action
@@ -610,7 +692,7 @@ class DemoAgent(Agent):
                     }
                 )
 
-        # Inject memory exemplars before asking for next action
+        # Inject memory exemplars before asking for next action (static file-based)
         memory_exemplars = load_memory_exemplars()
         if memory_exemplars:
             logger.info("Memory exemplars loaded and injected into prompt")
@@ -622,6 +704,56 @@ class DemoAgent(Agent):
             )
         else:
             logger.warning("No memory exemplars loaded - check if memory_exemplars.json exists")
+        
+        # Inject pending memory query results if available
+        if self.pending_memory_results:
+            user_msgs.append({
+                "type": "text",
+                "text": self.pending_memory_results,
+            })
+            self.pending_memory_results = None  # Clear after use
+        
+        # Automatic memory injection on errors (safety net)
+        if self.use_memory and self.memory_index and obs.get("last_action_error"):
+            state_summary = self._extract_state_summary(obs)
+            task_type = self._get_task_type_from_obs(obs)
+            memory_text = self.memory_index.get_memories_for_prompt(
+                current_state_summary=state_summary,
+                current_action_context=None,
+                current_error=obs["last_action_error"],
+                task_type=task_type,
+            )
+            if memory_text:
+                user_msgs.append({
+                    "type": "text",
+                    "text": memory_text,
+                })
+        
+        # Memory system awareness instructions
+        if self.use_memory and self.memory_index:
+            user_msgs.append({
+                "type": "text",
+                "text": """\
+# Memory System
+
+You have access to a memory index that contains past experiences and solutions to similar problems. 
+The memory system can help you when:
+- You encounter an error you haven't seen before
+- You're unsure about the next step
+- You're stuck or repeating the same actions
+- You want to learn from past successes or failures
+
+You can query memory by using the query_memory() action:
+  query_memory("description of your problem or what you're looking for")
+
+For example:
+  query_memory("I'm getting an error about element not found")
+  query_memory("How do I fill a search textbox correctly?")
+
+The memory system will return relevant past experiences that can guide your actions.
+
+""",
+            })
 
         # ask for the next action
         user_msgs.append(
@@ -667,6 +799,22 @@ class DemoAgent(Agent):
         # query model using the abstraction function
         action = self.query_model(system_msgs, user_msgs)
 
+        # Check if action contains a memory query
+        memory_query = self._detect_memory_query(action)
+        if memory_query:
+            # Execute memory query and store results for next turn
+            task_type = self._get_task_type_from_obs(obs)
+            self.pending_memory_results = self._query_memory(memory_query, task_type=task_type)
+            
+            if self.pending_memory_results:
+                logger.info(f"Memory query executed: {memory_query[:50]}...")
+                # Return noop action since this is just a query, not a browser action
+                return "noop()", {}
+            else:
+                logger.info(f"Memory query returned no results: {memory_query[:50]}...")
+                # Still return noop if no results
+                return "noop()", {}
+
         # Extract action type for a cleaner log message
         action_type = action.split("(")[0] if "(" in action else "unknown"
         action_args = action.split("(", 1)[1].rstrip(")") if "(" in action else ""
@@ -705,6 +853,12 @@ class DemoAgentArgs(AbstractAgentArgs):
     openrouter_site_name: Optional[str] = None
     anthropic_api_key: Optional[str] = None
 
+    # Memory system configuration
+    use_memory: bool = False
+    memory_dir: str = "./agent_memories"
+    memory_top_k: int = 3
+    memory_embedding_model: str = "BAAI/bge-large-en-v1.5"
+
     def make_agent(self):
         return DemoAgent(
             model_name=self.model_name,
@@ -721,4 +875,9 @@ class DemoAgentArgs(AbstractAgentArgs):
             openrouter_site_url=self.openrouter_site_url,
             openrouter_site_name=self.openrouter_site_name,
             anthropic_api_key=self.anthropic_api_key,
+            # Pass memory configuration
+            use_memory=self.use_memory,
+            memory_dir=self.memory_dir,
+            memory_top_k=self.memory_top_k,
+            memory_embedding_model=self.memory_embedding_model,
         )

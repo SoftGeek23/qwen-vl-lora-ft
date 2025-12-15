@@ -171,10 +171,12 @@ and executed by a program, make sure to follow the formatting instructions.
         # INJECT MEMORY HERE - before other context
         if self.use_memory and self.memory_index:
             task_type = self._get_task_type_from_obs(obs)
+            current_error = obs.get("last_action_error")
             memory_text = self.memory_index.get_memories_for_prompt(
-                state_summary,
-                action_context,
-                task_type,
+                current_state_summary=state_summary,
+                current_action_context=action_context,
+                current_error=current_error,
+                task_type=task_type,
             )
             if memory_text:
                 user_msgs.append({

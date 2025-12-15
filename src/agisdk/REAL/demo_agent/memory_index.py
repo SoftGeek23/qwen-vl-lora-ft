@@ -57,7 +57,7 @@ class MemoryIndex:
     def __init__(
         self,
         memory_dir: str = "./agent_memories",
-        embedding_model: str = "all-MiniLM-L6-v2",
+        embedding_model: str = "BAAI/bge-large-en-v1.5",
         use_embeddings: bool = True,
         top_k: int = 3,
     ):
@@ -111,13 +111,30 @@ class MemoryIndex:
         print(f"Loaded {len(self.memories)} memories from {self.memory_file}")
     
     def _update_embeddings(self):
-        """Update embeddings for all memories."""
+        """Update embeddings for all memories with enhanced context including failures/states."""
         if not self.use_embeddings or not self.embedder:
             return
         
-        state_texts = [
-            f"{mem.state_summary} {mem.action}" for mem in self.memories
-        ]
+        # Build rich context: state + action + result + reflection
+        state_texts = []
+        for mem in self.memories:
+            parts = [mem.state_summary, mem.action]
+            
+            # Include failure/state description
+            if "failure" in mem.result.lower():
+                parts.append(f"Failure: {mem.result}")
+            elif "success" in mem.result.lower():
+                parts.append("Success")
+            else:
+                parts.append(f"Result: {mem.result}")
+            
+            # Include reflection (describes what the state/failure is)
+            if mem.reflection:
+                parts.append(f"Context: {mem.reflection}")
+            
+            embedding_text = " | ".join(parts)
+            state_texts.append(embedding_text)
+        
         self.embeddings = self.embedder.encode(state_texts, convert_to_numpy=True)
     
     def add_memory(
@@ -162,9 +179,20 @@ class MemoryIndex:
             if self.embeddings is None:
                 self._update_embeddings()
             else:
-                # Incrementally add embedding
+                # Incrementally add embedding with enhanced context
+                parts = [state_summary, action]
+                if "failure" in result.lower():
+                    parts.append(f"Failure: {result}")
+                elif "success" in result.lower():
+                    parts.append("Success")
+                else:
+                    parts.append(f"Result: {result}")
+                if reflection:
+                    parts.append(f"Context: {reflection}")
+                
+                embedding_text = " | ".join(parts)
                 new_embedding = self.embedder.encode(
-                    [f"{state_summary} {action}"], 
+                    [embedding_text], 
                     convert_to_numpy=True
                 )
                 self.embeddings = np.vstack([self.embeddings, new_embedding])
@@ -173,6 +201,7 @@ class MemoryIndex:
         self,
         current_state_summary: str,
         current_action_context: Optional[str] = None,
+        current_error: Optional[str] = None,
         task_type: Optional[str] = None,
         top_k: Optional[int] = None,
     ) -> List[MemoryExemplar]:
@@ -202,11 +231,14 @@ class MemoryIndex:
             return []
         
         if self.use_embeddings and self.embedder:
-            # Use semantic similarity with embeddings
-            query_text = f"{current_state_summary}"
+            # Build query with error context if present
+            query_parts = [current_state_summary]
             if current_action_context:
-                query_text += f" {current_action_context}"
+                query_parts.append(current_action_context)
+            if current_error:
+                query_parts.append(f"Error: {current_error}")
             
+            query_text = " | ".join(query_parts)
             query_embedding = self.embedder.encode([query_text], convert_to_numpy=True)
             
             # Get indices of candidate memories
@@ -244,6 +276,7 @@ class MemoryIndex:
         self,
         current_state_summary: str,
         current_action_context: Optional[str] = None,
+        current_error: Optional[str] = None,
         task_type: Optional[str] = None,
     ) -> str:
         """
@@ -254,6 +287,7 @@ class MemoryIndex:
         memories = self.retrieve_similar(
             current_state_summary,
             current_action_context,
+            current_error,
             task_type,
         )
         
@@ -273,6 +307,42 @@ class MemoryIndex:
         self.embeddings = None
         if self.memory_file.exists():
             self.memory_file.unlink()
+    
+    def query_memory(
+        self,
+        query_text: str,
+        task_type: Optional[str] = None,
+        top_k: Optional[int] = None,
+    ) -> str:
+        """
+        Query memory with a natural language description.
+        
+        Args:
+            query_text: Natural language description of what to search for
+            task_type: Filter by task type if provided
+            top_k: Number of memories to retrieve
+            
+        Returns:
+            Formatted string with relevant memories
+        """
+        # Use query_text as state summary, no action context
+        memories = self.retrieve_similar(
+            current_state_summary=query_text,
+            current_action_context=None,
+            current_error=None,
+            task_type=task_type,
+            top_k=top_k,
+        )
+        
+        if not memories:
+            return ""
+        
+        formatted = "## Memory Query Results\n\n"
+        for i, mem in enumerate(memories, 1):
+            formatted += f"### Memory {i}\n{mem.to_text()}\n\n"
+        
+        formatted += "Use these memories to guide your action. Learn from past successes and failures.\n"
+        return formatted
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about stored memories."""
