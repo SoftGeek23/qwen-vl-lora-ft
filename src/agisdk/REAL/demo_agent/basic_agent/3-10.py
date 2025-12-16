@@ -1,9 +1,13 @@
 import base64
 import dataclasses
 import io
+import json
 import logging
+import re
 import time
+from pathlib import Path
 from typing import Literal, Optional
+# 3/10
 
 import numpy as np
 from PIL import Image
@@ -19,6 +23,46 @@ from agisdk.REAL.browsergym.utils.obs import (
 from ..logging import logger as rich_logger
 
 logger = logging.getLogger(__name__)
+
+
+def load_memory_exemplars() -> str:
+    """
+    Load memory exemplars from JSON file and format them for the prompt.
+    Returns empty string if file doesn't exist or can't be loaded.
+    """
+    try:
+        # Path relative to this file
+        exemplars_path = Path(__file__).parent / "memory_exemplars.json"
+        if not exemplars_path.exists():
+            return ""
+        
+        with open(exemplars_path, 'r') as f:
+            exemplars = json.load(f)
+        
+        if not exemplars:
+            return ""
+        
+        formatted = "## Relevant Examples from Past Experiences\n\n"
+        formatted += "Learn from these examples to avoid common mistakes:\n\n"
+        
+        for i, ex in enumerate(exemplars, 1):
+            formatted += f"### Example {i}\n"
+            formatted += f"**State:** {ex['state']['summary']}\n"
+            formatted += f"- URL: {ex['state']['url']}\n"
+            formatted += f"- Key elements: {ex['state']['key_elements']}\n"
+            formatted += f"**Action:** `{ex['action']}`\n"
+            formatted += f"**Result:** {ex['result']}\n"
+            formatted += f"**Reflection:** {ex['reflection']}\n\n"
+        
+        formatted += "Use these examples to guide your actions. Pay special attention to:\n"
+        formatted += "- Distinguishing between buttons (for clicking) and input fields (for typing)\n"
+        formatted += "- Only executing ONE action per step (no multiple actions together)\n"
+        formatted += "- Identifying the correct element type before using fill() or click()\n\n"
+        
+        return formatted
+    except Exception as e:
+        logger.warning(f"Failed to load memory exemplars: {e}")
+        return ""
 
 
 # Handling Screenshots
@@ -73,6 +117,64 @@ class DemoAgent(Agent):
     def update_last_observation(self, obs):
         """Store the last observation for metrics"""
         self.last_observation = obs
+    
+    def _extract_state_summary(self, obs: dict) -> str:
+        """Extract a textual summary of the current state for memory indexing."""
+        summary_parts = []
+        
+        # URL
+        if obs.get("url"):
+            summary_parts.append(f"URL: {obs['url']}")
+        
+        # Key elements from axtree (first 500 chars)
+        if obs.get("axtree_txt"):
+            axtree_snippet = obs["axtree_txt"][:500]
+            summary_parts.append(f"Page elements: {axtree_snippet}")
+        
+        # Last action error (if any) - important context
+        if obs.get("last_action_error"):
+            summary_parts.append(f"Last error: {obs['last_action_error'][:200]}")
+        
+        # Goal context
+        if obs.get("goal_object"):
+            goal_text = str(obs["goal_object"])
+            if len(goal_text) > 200:
+                goal_text = goal_text[:200] + "..."
+            summary_parts.append(f"Goal: {goal_text}")
+        
+        return " | ".join(summary_parts)
+    
+    def _get_task_type_from_obs(self, obs: dict) -> Optional[str]:
+        """Extract task type from observation if available."""
+        # Try to extract from URL or task_id
+        url = obs.get("url", "")
+        task_id = obs.get("task_id", "")
+        
+        if "omnizon" in url.lower() or "omnizon" in task_id.lower():
+            return "omnizon"
+        elif "dashdish" in url.lower() or "dashdish" in task_id.lower():
+            return "dashdish"
+        elif "staynb" in url.lower() or "staynb" in task_id.lower():
+            return "staynb"
+        # Add more task type detection as needed
+        
+        return None
+    
+    def _query_memory(self, query_text: str, task_type: Optional[str] = None) -> str:
+        """Query the memory index and return formatted results."""
+        if not self.use_memory or not self.memory_index:
+            return ""
+        
+        return self.memory_index.query_memory(query_text, task_type=task_type)
+    
+    def _detect_memory_query(self, action: str) -> Optional[str]:
+        """Detect if action contains a memory query request."""
+        # Look for query_memory("...") pattern
+        pattern = r'query_memory\s*\(\s*["\']([^"\']+)["\']\s*\)'
+        match = re.search(pattern, action, re.IGNORECASE)
+        if match:
+            return match.group(1)
+        return None
 
     def __init__(
         self,
@@ -94,15 +196,6 @@ class DemoAgent(Agent):
         memory_top_k: int = 3,
         memory_embedding_model: str = "BAAI/bge-large-en-v1.5",
     ) -> None:
-        """
-        Initialize DemoAgent.
-        
-        Args:
-            use_memory: Whether to use memory system
-            memory_dir: Directory for memory storage
-            memory_top_k: Number of memories to retrieve per query
-            memory_embedding_model: Model for memory embeddings
-        """
         super().__init__()
         self.chat_mode = chat_mode
         self.use_html = use_html
@@ -234,34 +327,13 @@ class DemoAgent(Agent):
             )
             self.model_name = actual_model_name
 
-            # Define function to query local vLLM models
+            # Define function to query OpenRouter models
             def query_model(system_msgs, user_msgs):
-                # Combine system messages into a single string
-                system_content = "\n\n".join([msg["text"] for msg in system_msgs if msg["type"] == "text"])
-                
-                # Debug: verify strategies are in system content
-                if "High-Level Strategies" in system_content:
-                    logger.debug("✅ Strategies confirmed in system content")
-                else:
-                    logger.warning("⚠️ Strategies NOT found in system content!")
-                    logger.warning(f"System messages count: {len(system_msgs)}")
-                    logger.warning(f"System content length: {len(system_content)}")
-                
-                # Format user messages
-                user_content = []
-                for msg in user_msgs:
-                    if msg["type"] == "text":
-                        user_content.append({"type": "text", "text": msg["text"]})
-                    elif msg["type"] == "image_url":
-                        user_content.append(
-                            {"type": "image_url", "image_url": msg["image_url"]}
-                        )
-                
                 completion = self.client.chat.completions.create(
                     model=self.model_name,
                     messages=[
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": user_content},
+                        {"role": "system", "content": system_msgs},
+                        {"role": "user", "content": user_msgs},
                     ],
                     max_tokens=500,
                     temperature=1.0,
@@ -418,21 +490,15 @@ class DemoAgent(Agent):
         if self.use_memory:
             try:
                 from .memory_index import MemoryIndex
-                from .strategy_manager import StrategyManager
-                from pathlib import Path
-                
                 self.memory_index = MemoryIndex(
                     memory_dir=memory_dir,
                     embedding_model=memory_embedding_model,
                     top_k=memory_top_k,
                 )
-                self.strategy_manager = StrategyManager(strategy_file=str(Path(memory_dir) / "strategies.json"))
                 logger.info(f"Memory index initialized with {len(self.memory_index.memories)} existing memories")
-                logger.info(f"Strategy manager initialized with {len(self.strategy_manager.strategies)} strategies")
             except Exception as e:
                 logger.warning(f"Failed to initialize memory index: {e}")
                 self.use_memory = False
-                self.strategy_manager = None
 
     def get_action(self, obs: dict) -> tuple[str, dict]:
         # Print task start information if this is the first action
@@ -469,25 +535,6 @@ class DemoAgent(Agent):
                             """,
                 }
             )
-            
-            # Inject high-level strategies into system prompt (for chat mode too)
-            if self.use_memory and self.strategy_manager:
-                strategies_text = self.strategy_manager.get_strategies_for_prompt()
-                if strategies_text:
-                    logger.info(f"Injecting {len(self.strategy_manager.strategies)} strategies into prompt (chat mode)")
-                    print(f"✅ INJECTING {len(self.strategy_manager.strategies)} STRATEGIES INTO PROMPT (CHAT MODE)")  # Visible debug
-                    system_msgs.append({
-                        "type": "text",
-                        "text": strategies_text,
-                    })
-                else:
-                    logger.debug("No strategies to inject (chat mode)")
-                    print("⚠️ No strategies text to inject (chat mode)")
-            else:
-                if self.use_memory:
-                    logger.warning("Strategy manager not initialized despite use_memory=True (chat mode)")
-                    print(f"⚠️ Strategy manager not initialized (chat mode): use_memory={self.use_memory}, strategy_manager={self.strategy_manager}")
-            
             # append chat messages
             user_msgs.append(
                 {
@@ -526,31 +573,6 @@ class DemoAgent(Agent):
                             """,
                 }
             )
-            
-            # Inject high-level strategies into system prompt
-            if self.use_memory and self.strategy_manager:
-                strategies_text = self.strategy_manager.get_strategies_for_prompt()
-                if strategies_text:
-                    logger.info(f"Injecting {len(self.strategy_manager.strategies)} strategies into prompt")
-                    # Log to both logger and stderr (visible in Ray logs)
-                    import sys
-                    print(f"✅ INJECTING {len(self.strategy_manager.strategies)} STRATEGIES INTO PROMPT", file=sys.stderr, flush=True)
-                    system_msgs.append({
-                        "type": "text",
-                        "text": strategies_text,
-                    })
-                    # Verify it was added
-                    logger.debug(f"System messages count after strategy injection: {len(system_msgs)}")
-                else:
-                    logger.warning("No strategies text to inject despite strategies existing")
-                    import sys
-                    print("⚠️ No strategies text to inject", file=sys.stderr, flush=True)
-            else:
-                if self.use_memory:
-                    logger.warning(f"Strategy manager not initialized: use_memory={self.use_memory}, strategy_manager={self.strategy_manager}")
-                    import sys
-                    print(f"⚠️ Strategy manager not initialized: use_memory={self.use_memory}, strategy_manager={self.strategy_manager}", file=sys.stderr, flush=True)
-            
             # append goal
             user_msgs.append(
                 {
@@ -670,6 +692,19 @@ class DemoAgent(Agent):
                     }
                 )
 
+        # Inject memory exemplars before asking for next action (static file-based)
+        memory_exemplars = load_memory_exemplars()
+        if memory_exemplars:
+            logger.info("Memory exemplars loaded and injected into prompt")
+            user_msgs.append(
+                {
+                    "type": "text",
+                    "text": memory_exemplars,
+                }
+            )
+        else:
+            logger.warning("No memory exemplars loaded - check if memory_exemplars.json exists")
+        
         # Inject pending memory query results if available
         if self.pending_memory_results:
             user_msgs.append({
@@ -678,63 +713,21 @@ class DemoAgent(Agent):
             })
             self.pending_memory_results = None  # Clear after use
         
-        # Extract state info once for memory operations
-        state_summary = None
-        task_type = None
-        if self.use_memory and self.memory_index:
+        # Automatic memory injection on errors (safety net)
+        if self.use_memory and self.memory_index and obs.get("last_action_error"):
             state_summary = self._extract_state_summary(obs)
             task_type = self._get_task_type_from_obs(obs)
-        
-        # Detect action loops (repeating same action)
-        action_loop_detected = False
-        if self.use_memory and self.memory_index and len(self.action_history) >= 3:
-            # Check if last 3 actions are the same
-            recent_actions = self.action_history[-3:]
-            if len(set(recent_actions)) == 1:  # All 3 are identical
-                action_loop_detected = True
-                logger.warning(f"Action loop detected: repeating {recent_actions[0]}")
-        
-        # Proactive memory injection based on current state (always inject top-k similar memories)
-        if self.use_memory and self.memory_index and state_summary:
-            # Get similar memories based on current state (proactive)
-            proactive_memories = self.memory_index.get_memories_for_prompt(
+            memory_text = self.memory_index.get_memories_for_prompt(
                 current_state_summary=state_summary,
                 current_action_context=None,
-                current_error=None,
+                current_error=obs["last_action_error"],
                 task_type=task_type,
             )
-            
-            if proactive_memories:
+            if memory_text:
                 user_msgs.append({
                     "type": "text",
-                    "text": proactive_memories,
+                    "text": memory_text,
                 })
-        
-        # Automatic memory injection on errors OR action loops (safety net)
-        if self.use_memory and self.memory_index and state_summary:
-            # Inject memories for errors
-            if obs.get("last_action_error"):
-                error_memories = self.memory_index.get_memories_for_prompt(
-                    current_state_summary=state_summary,
-                    current_action_context=None,
-                    current_error=obs["last_action_error"],
-                    task_type=task_type,
-                )
-                if error_memories:
-                    user_msgs.append({
-                        "type": "text",
-                        "text": error_memories,
-                    })
-            
-            # Inject memories for action loops (proactive)
-            if action_loop_detected:
-                loop_query = "repeatedly clicking the same element with no progress"
-                loop_memory = self.memory_index.query_memory(loop_query, task_type=task_type)
-                if loop_memory:
-                    user_msgs.append({
-                        "type": "text",
-                        "text": loop_memory,
-                    })
         
         # Memory system awareness instructions
         if self.use_memory and self.memory_index:
@@ -744,11 +737,16 @@ class DemoAgent(Agent):
 # Memory System
 
 You have access to a memory index that contains past experiences and solutions to similar problems. 
-If you encounter an error or are unsure about how to proceed, you can query the memory system using:
+The memory system can help you when:
+- You encounter an error you haven't seen before
+- You're unsure about the next step
+- You're stuck or repeating the same actions
+- You want to learn from past successes or failures
 
-```query_memory("description of what you're looking for")```
+You can query memory by using the query_memory() action:
+  query_memory("description of your problem or what you're looking for")
 
-Examples:
+For example:
   query_memory("I'm getting an error about element not found")
   query_memory("How do I fill a search textbox correctly?")
 
@@ -764,7 +762,13 @@ The memory system will return relevant past experiences that can guide your acti
                 "text": """\
                         # Next action
 
-                        You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, the current state of the page before deciding on your next action.
+                        You will now think step by step and produce your next best action. Reflect on your past actions, any resulting error message, the current state of the page, and the examples above before deciding on your next action.
+
+                        IMPORTANT RULES:
+                        1. When you have completed the task and found information that needs to be communicated (such as describing a product, providing search results, or answering a question), you MUST use send_msg_to_user() to send a message describing what you found. Simply displaying information on the page is not enough - you need to explicitly send a message to complete the task. Do not use noop() when you have completed the task and have information to share.
+                        2. If you receive an error message, you MUST address it. Do not assume an action succeeded if you received an error. Retry the failed action or find an alternative approach.
+                        3. Only output ONE action per response. Do not include multiple action calls in a single response, even if they are separated by text. Each action must be in its own separate response.
+                        4. Verify that your actions have actually completed successfully before moving on to the next step. If an action fails, you must retry it.
                         """,
             }
         )
@@ -796,21 +800,20 @@ The memory system will return relevant past experiences that can guide your acti
         action = self.query_model(system_msgs, user_msgs)
 
         # Check if action contains a memory query
-        if self.use_memory and self.memory_index:
-            memory_query = self._detect_memory_query(action)
-            if memory_query:
-                # Execute memory query and store results for next turn
-                task_type = self._get_task_type_from_obs(obs)
-                self.pending_memory_results = self._query_memory(memory_query, task_type=task_type)
-                
-                if self.pending_memory_results:
-                    logger.info(f"Memory query executed: {memory_query[:50]}...")
-                    # Return noop action since this is just a query, not a browser action
-                    return "noop()", {}
-                else:
-                    logger.info(f"Memory query returned no results: {memory_query[:50]}...")
-                    # Still return noop if no results
-                    return "noop()", {}
+        memory_query = self._detect_memory_query(action)
+        if memory_query:
+            # Execute memory query and store results for next turn
+            task_type = self._get_task_type_from_obs(obs)
+            self.pending_memory_results = self._query_memory(memory_query, task_type=task_type)
+            
+            if self.pending_memory_results:
+                logger.info(f"Memory query executed: {memory_query[:50]}...")
+                # Return noop action since this is just a query, not a browser action
+                return "noop()", {}
+            else:
+                logger.info(f"Memory query returned no results: {memory_query[:50]}...")
+                # Still return noop if no results
+                return "noop()", {}
 
         # Extract action type for a cleaner log message
         action_type = action.split("(")[0] if "(" in action else "unknown"
@@ -830,60 +833,6 @@ The memory system will return relevant past experiences that can guide your acti
         self.update_last_observation(obs)
 
         return action, {}
-    
-    def _extract_state_summary(self, obs: dict) -> str:
-        """Extract a textual summary of the current page state for memory indexing."""
-        parts = []
-        
-        # Add URL if available
-        if obs.get("url"):
-            parts.append(f"URL: {obs['url']}")
-        
-        # Add key elements from axtree (first 500 chars)
-        if obs.get("axtree_txt"):
-            axtree_snippet = obs["axtree_txt"][:500]
-            parts.append(f"Page elements: {axtree_snippet}...")
-        
-        # Add goal context
-        goal = obs.get("goal_object", "")
-        if goal:
-            if isinstance(goal, list) and len(goal) > 0:
-                if isinstance(goal[0], dict) and "text" in goal[0]:
-                    goal = goal[0]["text"]
-            parts.append(f"Goal: {str(goal)[:200]}")
-        
-        return " | ".join(parts) if parts else "Unknown state"
-    
-    def _get_task_type_from_obs(self, obs: dict) -> Optional[str]:
-        """Extract task type from observation."""
-        url = obs.get("url", "")
-        if "omnizon" in url.lower():
-            return "omnizon"
-        elif "dashdish" in url.lower():
-            return "dashdish"
-        # Add more task type detection as needed
-        return None
-    
-    def _detect_memory_query(self, action: str) -> Optional[str]:
-        """Detect if action contains a memory query."""
-        import re
-        # Look for query_memory("...") pattern
-        pattern = r'query_memory\(["\'](.+?)["\']\)'
-        match = re.search(pattern, action, re.IGNORECASE)
-        if match:
-            return match.group(1)
-        return None
-    
-    def _query_memory(self, query_text: str, task_type: Optional[str] = None) -> Optional[str]:
-        """Query the memory index and return formatted results."""
-        if not self.use_memory or not self.memory_index:
-            return None
-        
-        try:
-            return self.memory_index.query_memory(query_text, task_type=task_type)
-        except Exception as e:
-            logger.warning(f"Memory query failed: {e}")
-            return None
 
 
 @dataclasses.dataclass

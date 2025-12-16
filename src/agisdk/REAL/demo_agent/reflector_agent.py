@@ -13,6 +13,7 @@ a batch of tasks, it reflects on the patterns and updates memory.
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Optional
@@ -61,6 +62,9 @@ class ReflectorAgent:
         memory_index: MemoryIndex,
         reflector_model: str = None,
         use_llm_reflection: bool = True,
+        openai_api_key: Optional[str] = None,
+        openrouter_api_key: Optional[str] = None,
+        anthropic_api_key: Optional[str] = None,
     ):
         """
         Initialize the reflector agent.
@@ -69,14 +73,73 @@ class ReflectorAgent:
             memory_index: The memory index to update with new insights
             reflector_model: Model to use for reflection (if None, uses rule-based)
             use_llm_reflection: Whether to use LLM for reflection or rule-based
+            openai_api_key: OpenAI API key (falls back to env var)
+            openrouter_api_key: OpenRouter API key (falls back to env var)
+            anthropic_api_key: Anthropic API key (falls back to env var)
         """
         self.memory_index = memory_index
         self.reflector_model = reflector_model
         self.use_llm_reflection = use_llm_reflection and reflector_model is not None
         
+        # Initialize LLM client if using LLM reflection
+        self.llm_client = None
+        if self.use_llm_reflection:
+            self.llm_client = self._init_llm_client(
+                reflector_model,
+                openai_api_key,
+                openrouter_api_key,
+                anthropic_api_key,
+            )
+            if not self.llm_client:
+                logger.warning(f"Failed to initialize LLM client for {reflector_model}, falling back to rule-based reflection")
+                self.use_llm_reflection = False
+        
         # Statistics
         self.reflection_count = 0
         self.insights_generated = 0
+    
+    def _init_llm_client(
+        self,
+        model_name: str,
+        openai_api_key: Optional[str],
+        openrouter_api_key: Optional[str],
+        anthropic_api_key: Optional[str],
+    ):
+        """Initialize LLM client based on model name."""
+        try:
+            from anthropic import Anthropic
+            from openai import OpenAI
+            
+            if model_name.startswith("gpt-") or model_name.startswith("o1") or model_name.startswith("o3"):
+                client = OpenAI(api_key=openai_api_key or os.getenv("OPENAI_API_KEY"))
+                return ("openai", client, model_name)
+            
+            elif model_name.startswith("openrouter/"):
+                actual_model = model_name.replace("openrouter/", "", 1)
+                client = OpenAI(
+                    base_url="https://openrouter.ai/api/v1",
+                    api_key=openrouter_api_key or os.getenv("OPENROUTER_API_KEY"),
+                )
+                return ("openrouter", client, actual_model)
+            
+            elif model_name.startswith("local/"):
+                actual_model = model_name.replace("local/", "", 1)
+                client = OpenAI(
+                    base_url="http://localhost:7999/v1",
+                    api_key="FEEL_THE_AGI",
+                )
+                return ("local", client, actual_model)
+            
+            elif any(model_name.startswith(prefix) for prefix in ["claude-", "sonnet-"]):
+                client = Anthropic(api_key=anthropic_api_key or os.getenv("ANTHROPIC_API_KEY"))
+                return ("anthropic", client, model_name)
+            
+            else:
+                logger.warning(f"Unknown model type: {model_name}, falling back to rule-based")
+                return None
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM client: {e}")
+            return None
     
     def collect_task_logs(
         self,
@@ -187,16 +250,18 @@ class ReflectorAgent:
         self,
         task_logs: List[TaskLog],
         task_type_filter: Optional[str] = None,
-    ) -> List[MemoryExemplar]:
+    ) -> tuple[List[MemoryExemplar], List[str]]:
         """
-        Reflect on task logs and generate memory insights.
+        Reflect on task logs and generate memory insights and high-level strategies.
         
         Args:
             task_logs: List of task logs to analyze
             task_type_filter: Only reflect on logs of this task type
             
         Returns:
-            List of new MemoryExemplar objects to add
+            Tuple of (new_memories, new_strategies):
+            - new_memories: List of new MemoryExemplar objects (specific cases)
+            - new_strategies: List of high-level strategy strings (for prompt injection)
         """
         # Filter by task type if specified
         if task_type_filter:
@@ -204,7 +269,7 @@ class ReflectorAgent:
         
         if not task_logs:
             logger.warning("No task logs to reflect on")
-            return []
+            return [], []
         
         # Separate successes and failures
         successes = [log for log in task_logs if log.success]
@@ -213,25 +278,38 @@ class ReflectorAgent:
         logger.info(f"Reflecting on {len(task_logs)} tasks: {len(successes)} successes, {len(failures)} failures")
         
         new_memories = []
+        new_strategies = []
         
-        # Analyze common failure patterns
-        if failures:
-            failure_insights = self._analyze_failures(failures)
-            new_memories.extend(failure_insights)
-        
-        # Analyze successful strategies
-        if successes:
-            success_insights = self._analyze_successes(successes)
-            new_memories.extend(success_insights)
-        
-        # Generate cross-task insights
-        cross_insights = self._generate_cross_task_insights(task_logs)
-        new_memories.extend(cross_insights)
+        # Use LLM-based reflection if available, otherwise fall back to rule-based
+        if self.use_llm_reflection and self.llm_client:
+            logger.info("Using LLM-based reflection to generate memories and strategies")
+            llm_memories, llm_strategies = self._generate_llm_memories_and_strategies(task_logs, successes, failures)
+            new_memories.extend(llm_memories)
+            new_strategies.extend(llm_strategies)
+        else:
+            logger.info("Using rule-based reflection to generate memories")
+            # Analyze common failure patterns
+            if failures:
+                failure_insights = self._analyze_failures(failures)
+                new_memories.extend(failure_insights)
+            
+            # Analyze successful strategies
+            if successes:
+                success_insights = self._analyze_successes(successes)
+                new_memories.extend(success_insights)
+            
+            # Generate cross-task insights
+            cross_insights = self._generate_cross_task_insights(task_logs)
+            new_memories.extend(cross_insights)
+            
+            # Extract high-level strategies from patterns
+            strategies = self._extract_high_level_strategies(task_logs, successes, failures)
+            new_strategies.extend(strategies)
         
         self.reflection_count += 1
         self.insights_generated += len(new_memories)
         
-        return new_memories
+        return new_memories, new_strategies
     
     def _analyze_failures(self, failures: List[TaskLog]) -> List[MemoryExemplar]:
         """Analyze common failure patterns."""
@@ -286,8 +364,6 @@ class ReflectorAgent:
                 action="Consider re-evaluating approach or checking for errors",
                 result="failure",
                 reflection=f"Tasks that fail often take {avg_steps_failure:.1f} steps vs {avg_steps_success:.1f} for successes. If a task is taking too long, consider changing strategy.",
-                task_type=None,  # Applies to all tasks
-                timestamp=time.time(),
             )
             insights.append(insight)
         
@@ -363,8 +439,6 @@ class ReflectorAgent:
             action=suggested_action,
             result=f"failure: {error_category} (seen in {len(failures)} tasks)",
             reflection=reflection,
-            task_type=failures[0].task_type if failures else None,
-            timestamp=time.time(),
         )
     
     def _find_common_action_patterns(
@@ -403,8 +477,6 @@ class ReflectorAgent:
             action=pattern.split(" -> ")[0] if " -> " in pattern else pattern,
             result="success",
             reflection=f"This action sequence worked well in {len(successes)} successful tasks. Consider using similar approach.",
-            task_type=task_type,
-            timestamp=time.time(),
         )
     
     def update_memory_index(self, new_memories: List[MemoryExemplar]):
@@ -415,11 +487,300 @@ class ReflectorAgent:
                 action=memory.action,
                 result=memory.result,
                 reflection=memory.reflection,
-                task_type=memory.task_type,
-                task_id=memory.task_id,
             )
         
         logger.info(f"Added {len(new_memories)} new memory insights to index")
+    
+    def _generate_llm_memories_and_strategies(
+        self,
+        task_logs: List[TaskLog],
+        successes: List[TaskLog],
+        failures: List[TaskLog],
+    ) -> tuple[List[MemoryExemplar], List[str]]:
+        """Generate memories and strategies using LLM-based reflection on actual task logs."""
+        if not self.llm_client:
+            return [], []
+        
+        client_type, client, model_name = self.llm_client
+        
+        # Build detailed prompt with actual task data
+        prompt = self._build_reflection_prompt(task_logs, successes, failures)
+        
+        try:
+            if client_type == "anthropic":
+                response = self._query_anthropic(client, model_name, prompt)
+            else:
+                response = self._query_openai(client, model_name, prompt, client_type == "openrouter")
+            
+            # Parse LLM response into MemoryExemplar objects and strategies
+            memories, strategies = self._parse_llm_response(response, task_logs)
+            logger.info(f"LLM generated {len(memories)} memory insights and {len(strategies)} strategies")
+            return memories, strategies
+            
+        except Exception as e:
+            logger.error(f"LLM reflection failed: {e}, falling back to rule-based")
+            return [], []
+    
+    def _build_reflection_prompt(
+        self,
+        task_logs: List[TaskLog],
+        successes: List[TaskLog],
+        failures: List[TaskLog],
+    ) -> str:
+        """Build a detailed prompt for LLM reflection using actual task data."""
+        
+        prompt = """You are analyzing task execution logs to extract two types of insights for an AI agent:
+
+1. **SPECIFIC MEMORIES**: Contextual, state-action-result exemplars for specific situations
+2. **HIGH-LEVEL STRATEGIES**: General guidance and best practices for the agent's prompt
+
+## MEMORIES (Specific Cases)
+These are contextual exemplars that help the agent in specific situations. For each memory, provide:
+- **state_summary**: A specific, contextual description of the page state or situation (include URL, key elements, goal context)
+- **action**: The specific action taken (or that should be taken)
+- **result**: "success" or "failure: [specific error message]"
+- **reflection**: A detailed explanation of why it worked/didn't work, what was learned, and how to apply this knowledge
+
+Focus on:
+- Specific, actionable insights (not generic advice)
+- Real error messages and page states from the logs
+- Patterns that appear multiple times
+- Concrete guidance the agent can follow
+
+## STRATEGIES (High-Level Guidance)
+These are general best practices that should be added to the agent's system prompt. Examples:
+- "When a task asks to 'display' or 'show' information, use send_msg_to_user() to communicate the result"
+- "If you've completed the main goal but the task isn't marked complete, check if you need to communicate the result"
+- "When stuck in a loop, try a different approach rather than repeating the same action"
+
+Focus on:
+- General principles and best practices
+- Task completion patterns
+- Communication patterns (send_msg_to_user usage)
+- High-level workflow guidance
+
+Return your analysis as a JSON object with two arrays:
+{
+  "memories": [
+    {
+      "state_summary": "...",
+      "action": "...",
+      "result": "...",
+      "reflection": "..."
+    }
+  ],
+  "strategies": [
+    "Strategy 1: ...",
+    "Strategy 2: ..."
+  ]
+}
+
+"""
+        
+        # Add failure examples with actual data
+        if failures:
+            prompt += "\n## FAILURE PATTERNS TO ANALYZE\n\n"
+            for i, failure in enumerate(failures[:10], 1):  # Limit to 10 for prompt size
+                prompt += f"### Failure {i}: {failure.task_name}\n"
+                prompt += f"- Task Type: {failure.task_type or 'unknown'}\n"
+                prompt += f"- Steps: {failure.n_steps}\n"
+                if failure.error:
+                    prompt += f"- Error: {failure.error[:300]}\n"
+                if failure.actions:
+                    prompt += f"- Actions taken: {', '.join(failure.actions[:5])}\n"
+                prompt += "\n"
+        
+        # Add success examples with actual data
+        if successes:
+            prompt += "\n## SUCCESS PATTERNS TO ANALYZE\n\n"
+            for i, success in enumerate(successes[:10], 1):  # Limit to 10 for prompt size
+                prompt += f"### Success {i}: {success.task_name}\n"
+                prompt += f"- Task Type: {success.task_type or 'unknown'}\n"
+                prompt += f"- Steps: {success.n_steps}\n"
+                if success.actions:
+                    prompt += f"- Actions taken: {', '.join(success.actions[:5])}\n"
+                prompt += "\n"
+        
+        prompt += """
+Analyze these patterns and generate 3-8 high-quality memory insights. Focus on:
+1. Common failure modes with specific error messages
+2. Successful action sequences that worked
+3. Specific page states or contexts where mistakes occurred
+4. Actionable guidance based on real examples
+
+Return ONLY a valid JSON array, no other text.
+"""
+        
+        return prompt
+    
+    def _query_openai(self, client, model_name: str, prompt: str, is_openrouter: bool = False) -> str:
+        """Query OpenAI-compatible API."""
+        messages = [
+            {
+                "role": "system",
+                "content": "You are an expert at analyzing AI agent behavior and extracting actionable insights. Always return valid JSON arrays."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        if is_openrouter:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=2000,
+                temperature=0.3,  # Lower temperature for more consistent reflection
+            )
+        else:
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                max_tokens=2000,
+                temperature=0.3,
+            )
+        
+        return response.choices[0].message.content
+    
+    def _query_anthropic(self, client, model_name: str, prompt: str) -> str:
+        """Query Anthropic API with support for thinking mode."""
+        # Handle thinking mode (e.g., "sonnet-3.7:thinking")
+        ANTHROPIC_MODELS = {
+            "claude-3-opus": "claude-3-opus-20240229",
+            "claude-3-sonnet": "claude-3-sonnet-20240229",
+            "claude-3-haiku": "claude-3-haiku-20240307",
+            "claude-3.5-sonnet": "claude-3-5-sonnet-20241022",
+            "claude-opus-4": "claude-opus-4-20250514",
+            "claude-sonnet-4": "claude-sonnet-4-20250514",
+            "sonnet-3.7": "claude-3-7-sonnet-20250219",
+        }
+        
+        # Parse model name and thinking mode
+        base_model_name = model_name.replace(":thinking", "")
+        thinking_enabled = model_name.endswith(":thinking")
+        
+        # Get the actual model ID
+        if base_model_name in ANTHROPIC_MODELS:
+            actual_model_id = ANTHROPIC_MODELS[base_model_name]
+        else:
+            # If not in mapping, assume it's a direct model ID
+            actual_model_id = base_model_name
+        
+        # Configure thinking based on model capabilities and user request
+        if thinking_enabled:
+            thinking_budget = 10000
+            thinking = {"type": "enabled", "budget_tokens": thinking_budget}
+            # max_tokens must be greater than thinking.budget_tokens
+            max_tokens = thinking_budget + 2000  # 12000 total
+        else:
+            thinking = {"type": "disabled"}
+            max_tokens = 2000
+        
+        # When thinking is enabled, temperature must be 1.0
+        temperature = 1.0 if thinking_enabled else 0.3
+        
+        response = client.messages.create(
+            model=actual_model_id,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking=thinking,
+            system="You are an expert at analyzing AI agent behavior and extracting actionable insights. Always return valid JSON arrays.",
+            messages=[
+                {"role": "user", "content": prompt}
+            ]
+        )
+        
+        # Extract text content (skip thinking blocks)
+        for content_block in response.content:
+            if content_block.type == "text":
+                return content_block.text
+            elif content_block.type == "thinking":
+                # Log thinking but don't return it
+                logger.debug(f"Thinking block: {content_block.thinking[:100] if hasattr(content_block, 'thinking') else '...'}...")
+        
+        raise ValueError("No text content in Anthropic response")
+    
+    def _parse_llm_response(self, response: str, task_logs: List[TaskLog]) -> tuple[List[MemoryExemplar], List[str]]:
+        """Parse LLM response into MemoryExemplar objects and strategies."""
+        memories = []
+        strategies = []
+        
+        try:
+            # Try to extract JSON from response (might have markdown code blocks)
+            json_match = re.search(r'\{.*\}', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+            else:
+                json_str = response.strip()
+            
+            # Parse JSON
+            data = json.loads(json_str)
+            
+            # Handle both old format (array) and new format (object with memories and strategies)
+            if isinstance(data, list):
+                # Old format: just memories array
+                for item in data:
+                    if isinstance(item, dict) and all(key in item for key in ["state_summary", "action", "result", "reflection"]):
+                        memory = MemoryExemplar(
+                            state_summary=item["state_summary"],
+                            action=item["action"],
+                            result=item["result"],
+                            reflection=item["reflection"],
+                        )
+                        memories.append(memory)
+            elif isinstance(data, dict):
+                # New format: object with memories and strategies
+                if "memories" in data and isinstance(data["memories"], list):
+                    for item in data["memories"]:
+                        if isinstance(item, dict) and all(key in item for key in ["state_summary", "action", "result", "reflection"]):
+                            memory = MemoryExemplar(
+                                state_summary=item["state_summary"],
+                                action=item["action"],
+                                result=item["result"],
+                                reflection=item["reflection"],
+                            )
+                            memories.append(memory)
+                
+                if "strategies" in data and isinstance(data["strategies"], list):
+                    strategies = [s for s in data["strategies"] if isinstance(s, str) and s.strip()]
+            else:
+                logger.warning("LLM response is not a valid JSON array or object")
+                return [], []
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse LLM response as JSON: {e}")
+            logger.debug(f"Response was: {response[:500]}")
+        except Exception as e:
+            logger.error(f"Error parsing LLM response: {e}")
+        
+        return memories, strategies
+    
+    def _extract_high_level_strategies(
+        self,
+        task_logs: List[TaskLog],
+        successes: List[TaskLog],
+        failures: List[TaskLog],
+    ) -> List[str]:
+        """Extract high-level strategies from task patterns (rule-based)."""
+        strategies = []
+        
+        # Analyze task completion patterns
+        if successes:
+            # Check if successful tasks used send_msg_to_user or similar
+            strategies.append("When a task asks to 'display', 'show', or 'find' information, use send_msg_to_user() to communicate the result to complete the task.")
+        
+        # Analyze failure patterns for high-level guidance
+        incomplete_tasks = [log for log in failures if log.n_steps >= 15]
+        if incomplete_tasks:
+            strategies.append("If you've taken many steps without progress, re-evaluate your approach. Consider using send_msg_to_user() if you've found the information but the task isn't completing.")
+        
+        # Analyze action loop patterns
+        loop_tasks = [log for log in failures if log.actions and len(set(log.actions[-3:])) == 1]
+        if loop_tasks:
+            strategies.append("When an action doesn't produce the expected result after 2-3 attempts, try a different approach instead of repeating the same action.")
+        
+        return strategies
     
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about reflections performed."""

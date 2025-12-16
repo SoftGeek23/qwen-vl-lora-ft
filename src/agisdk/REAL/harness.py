@@ -177,6 +177,7 @@ class harness:
         memory_dir: str = "./agent_memories",
         memory_top_k: int = 3,
         memory_embedding_model: str = "BAAI/bge-large-en-v1.5",
+        reflector_model: str = None,  # Model for LLM-based reflection (uses same as agent if None)
     ):
         """
         Initialize the harness with the provided configuration.
@@ -343,6 +344,7 @@ class harness:
         # Store memory configuration for later use in reflection
         self.use_memory = use_memory
         self.memory_dir = memory_dir
+        self.reflector_model = reflector_model
 
     def run(self, tasks: list[str] = None) -> dict[str, Any]:
         """
@@ -771,8 +773,25 @@ class harness:
                 top_k=getattr(self.agent_args, 'memory_top_k', 3),
             )
             
-            # Create reflector agent
-            reflector = ReflectorAgent(memory_index=memory_index)
+            # Determine reflector model (use same as agent if not specified)
+            reflector_model = self.reflector_model
+            if not reflector_model and hasattr(self.agent_args, 'model_name'):
+                reflector_model = self.agent_args.model_name
+            
+            # Get API keys from agent args if available
+            openai_api_key = getattr(self.agent_args, 'openai_api_key', None)
+            openrouter_api_key = getattr(self.agent_args, 'openrouter_api_key', None)
+            anthropic_api_key = getattr(self.agent_args, 'anthropic_api_key', None)
+            
+            # Create reflector agent with LLM support
+            reflector = ReflectorAgent(
+                memory_index=memory_index,
+                reflector_model=reflector_model,
+                use_llm_reflection=reflector_model is not None,
+                openai_api_key=openai_api_key,
+                openrouter_api_key=openrouter_api_key,
+                anthropic_api_key=anthropic_api_key,
+            )
             
             # Collect task logs from results
             task_logs = reflector.collect_task_logs(results, results_dir=self.results_dir)
@@ -781,14 +800,23 @@ class harness:
                 logger.info("No task logs to reflect on")
                 return
             
-            # Reflect on logs and generate memory insights
-            new_memories = reflector.reflect_on_logs(task_logs)
+            # Reflect on logs and generate memory insights and strategies
+            from agisdk.REAL.demo_agent.strategy_manager import StrategyManager
+            
+            strategy_manager = StrategyManager(strategy_file=str(Path(self.memory_dir) / "strategies.json"))
+            new_memories, new_strategies = reflector.reflect_on_logs(task_logs)
             
             if new_memories:
                 # Add memories to the index (this saves them to JSONL)
                 reflector.update_memory_index(new_memories)
                 logger.info(f"Reflector added {len(new_memories)} new memory insights to index")
-            else:
+            
+            if new_strategies:
+                # Add strategies to strategy manager (this saves them to JSON)
+                strategy_manager.add_strategies(new_strategies)
+                logger.info(f"Reflector added {len(new_strategies)} new high-level strategies")
+            
+            if not new_memories and not new_strategies:
                 logger.info("Reflector found no new insights to add")
                 
         except Exception as e:

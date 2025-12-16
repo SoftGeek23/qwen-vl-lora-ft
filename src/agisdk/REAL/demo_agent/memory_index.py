@@ -154,18 +154,14 @@ class MemoryIndex:
             action: The action taken
             result: "success" or "failure" or error message
             reflection: Why it worked/didn't work
-            task_type: Type of task (e.g., "omnizon")
-            task_id: Specific task identifier
+            task_type: Type of task (e.g., "omnizon") - deprecated, not used
+            task_id: Specific task identifier - deprecated, not used
         """
-        import time
         memory = MemoryExemplar(
             state_summary=state_summary,
             action=action,
             result=result,
             reflection=reflection,
-            task_type=task_type,
-            task_id=task_id,
-            timestamp=time.time(),
         )
         
         self.memories.append(memory)
