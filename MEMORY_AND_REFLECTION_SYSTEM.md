@@ -20,3 +20,14 @@ High-level strategies are stored in `strategies.json` and managed by the `Strate
 
 To reduce prompt bloat and improve relevance, the system should implement **semantic strategy retrieval** similar to memory retrieval. Instead of injecting all 32 strategies, the agent would retrieve only the **top 5-7 most relevant strategies** based on the current state context. This would be implemented by: (1) embedding all strategies using the same sentence-transformer model used for memories, (2) computing cosine similarity between the current state summary (and optionally current error/action context) and all strategy embeddings, (3) retrieving the top-k most relevant strategies, and (4) always including critical strategies (e.g., "one action per turn") regardless of similarity score to ensure fundamental rules are never omitted. The `StrategyManager.get_strategies_for_prompt()` method would be modified to accept optional `current_state_summary`, `current_error`, and `top_k` parameters, defaulting to semantic retrieval when context is provided and falling back to all strategies when not (for backward compatibility). This approach mirrors the memory retrieval pattern, maintains consistency in the codebase, and significantly reduces prompt size while ensuring the most relevant guidance is provided at each step.
 
+
+## North Star
+Every kth execution, we see active improvements in the agents accuracy over benchmarks, showing the utility of such a sleep state. 
+
+Next steps: 
+    - try on more benchmarks (ALFWorld, other custom web ones)
+    - Try on potentially more capable models (2 models)
+    - Try on other models similar size (1 model)
+    - Record results, publish 
+
+
