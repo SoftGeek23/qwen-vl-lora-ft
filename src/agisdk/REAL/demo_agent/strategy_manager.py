@@ -51,19 +51,35 @@ class StrategyManager:
         else:
             self.strategies = []
     
-    def add_strategies(self, new_strategies: List[str]):
+    def add_strategies(self, new_strategies: List[str], validate_universal: bool = True):
         """
-        Add new strategies, avoiding duplicates.
+        Add new strategies, avoiding duplicates and validating universality.
         
         Args:
             new_strategies: List of strategy strings to add
+            validate_universal: If True, reject contextual strategies (default: True)
         """
         # Clean new strategies first (strip prefixes)
         cleaned_new = []
+        rejected_contextual = []
+        
         for strategy in new_strategies:
             cleaned = self._clean_strategy_text(strategy)
             if cleaned:
+                # Validate universality if requested
+                if validate_universal and not self._is_universal_strategy(cleaned):
+                    rejected_contextual.append(cleaned)
+                    logger.warning(
+                        f"Rejected contextual strategy (should be a memory instead): {cleaned[:100]}..."
+                    )
+                    continue
                 cleaned_new.append(cleaned)
+        
+        if rejected_contextual:
+            logger.info(
+                f"Rejected {len(rejected_contextual)} contextual strategies. "
+                "These should be converted to memories instead."
+            )
         
         # Use cleaned versions for comparison
         existing_set = set(self._clean_strategy_text(s) for s in self.strategies)
@@ -79,7 +95,13 @@ class StrategyManager:
         if added_count > 0:
             # Consolidate and reorder after adding
             self.consolidate_and_reorder()
-            logger.info(f"Added {added_count} new strategies (total: {len(self.strategies)})")
+            logger.info(f"Added {added_count} new universal strategies (total: {len(self.strategies)})")
+        
+        return {
+            "added": added_count,
+            "rejected": len(rejected_contextual),
+            "rejected_strategies": rejected_contextual,
+        }
     
     def _clean_strategy_text(self, strategy: str) -> str:
         """
@@ -104,6 +126,99 @@ class StrategyManager:
         
         return strategy
     
+    def _is_universal_strategy(self, strategy: str) -> bool:
+        """
+        Check if strategy is truly universal (non-contextual).
+        
+        A strategy is universal if:
+        - It applies to ALL task types (not specific to e-commerce, forms, etc.)
+        - It contains NO contextual references
+        - It's a fundamental behavioral rule
+        
+        Args:
+            strategy: Strategy string to validate
+            
+        Returns:
+            True if strategy is universal, False if it's contextual
+        """
+        if not strategy:
+            return False
+        
+        strategy_lower = strategy.lower()
+        
+        # Contextual keywords that indicate the strategy is NOT universal
+        contextual_keywords = [
+            "when working with",
+            "when encountering",
+            "for [specific]",
+            "on e-commerce",
+            "for product",
+            "for dropdown",
+            "when on page",
+            "like [specific]",
+            "such as [specific]",
+            "for [task type]",
+            "when asked to",
+            "after performing",
+            "when reporting",
+            "for search",
+            "on [site]",
+            "when navigating",
+            "pay attention to",
+            "for multi-step",
+            "when a task takes",
+            "if a specific",
+            "before interacting",
+            "after multiple",
+            "when interacting",
+            "break down complex",
+            "for search interactions",
+            "when interacting with elements",
+        ]
+        
+        # Check for contextual phrases
+        for keyword in contextual_keywords:
+            if keyword in strategy_lower:
+                return False
+        
+        # Reject if contains specific patterns that indicate context
+        contextual_patterns = [
+            "→",  # Arrow indicating sequence
+            "sequence:",
+            "pattern:",
+            "follow this",
+            "follow the",
+            "use the pattern",
+            "follow a clear sequence",
+            "follow sequence",
+            "follow strict pattern",
+        ]
+        
+        for pattern in contextual_patterns:
+            if pattern in strategy_lower:
+                return False
+        
+        # Reject if mentions specific element types in a contextual way
+        if any(phrase in strategy_lower for phrase in [
+            "dropdown",
+            "select element",
+            "search box",
+            "search field",
+            "form field",
+            "button",
+            "link",
+            "element id",
+            "element with",
+        ]) and any(phrase in strategy_lower for phrase in [
+            "when",
+            "for",
+            "on",
+            "if",
+        ]):
+            return False
+        
+        return True
+    
     def _save_strategies(self):
         """Save strategies to file."""
         try:
@@ -113,15 +228,19 @@ class StrategyManager:
         except Exception as e:
             logger.error(f"Failed to save strategies: {e}")
     
-    def consolidate_and_reorder(self):
+    def consolidate_and_reorder(self, remove_contextual: bool = True):
         """
         Consolidate, deduplicate, and reorder strategies.
         
         This method:
         1. Removes "Strategy X:" prefixes from all stored strategies
-        2. Deduplicates semantically similar strategies
-        3. Prioritizes critical strategies (e.g., "one action per turn")
-        4. Orders strategies logically
+        2. Filters out contextual strategies (if remove_contextual=True)
+        3. Deduplicates semantically similar strategies
+        4. Prioritizes critical strategies (e.g., "one action per turn")
+        5. Orders strategies logically
+        
+        Args:
+            remove_contextual: If True, remove contextual strategies (default: True)
         """
         if not self.strategies:
             return
@@ -130,7 +249,18 @@ class StrategyManager:
         cleaned = [self._clean_strategy_text(s) for s in self.strategies]
         cleaned = [s for s in cleaned if s]  # Remove empty
         
-        # Step 2: Deduplicate exact matches
+        # Step 2: Filter out contextual strategies if requested
+        if remove_contextual:
+            original_count = len(cleaned)
+            cleaned = [s for s in cleaned if self._is_universal_strategy(s)]
+            removed_count = original_count - len(cleaned)
+            if removed_count > 0:
+                logger.warning(
+                    f"Removed {removed_count} contextual strategies during consolidation. "
+                    "These should be converted to memories instead."
+                )
+        
+        # Step 3: Deduplicate exact matches
         seen = set()
         unique = []
         for strategy in cleaned:
@@ -139,7 +269,7 @@ class StrategyManager:
                 seen.add(strategy_lower)
                 unique.append(strategy)
         
-        # Step 3: Prioritize critical strategies
+        # Step 4: Prioritize critical strategies
         critical_keywords = [
             "one action per turn",
             "single action",
@@ -159,7 +289,7 @@ class StrategyManager:
             else:
                 remaining.append(strategy)
         
-        # Step 4: Group similar strategies and keep the most concise version
+        # Step 5: Group similar strategies and keep the most concise version
         # Simple deduplication: if one strategy is a substring of another, keep the shorter one
         final = []
         for strategy in prioritized + remaining:
@@ -184,7 +314,7 @@ class StrategyManager:
         # Update strategies
         self.strategies = final
         self._save_strategies()
-        logger.info(f"Consolidated strategies: {len(final)} unique strategies (was {len(self.strategies)})")
+        logger.info(f"Consolidated strategies: {len(final)} unique universal strategies")
     
     def get_strategies_for_prompt(self) -> str:
         """

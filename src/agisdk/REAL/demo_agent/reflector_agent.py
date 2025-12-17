@@ -548,16 +548,29 @@ Focus on:
 - Concrete guidance the agent can follow
 
 ## STRATEGIES (High-Level Guidance)
-These are general best practices that should be added to the agent's system prompt. Examples:
-- "When a task asks to 'display' or 'show' information, use send_msg_to_user() to communicate the result"
-- "If you've completed the main goal but the task isn't marked complete, check if you need to communicate the result"
-- "When stuck in a loop, try a different approach rather than repeating the same action"
+CRITICAL: Strategies must be UNIVERSAL and NON-CONTEXTUAL. They apply to ALL tasks, regardless of context.
 
-Focus on:
-- General principles and best practices
-- Task completion patterns
-- Communication patterns (send_msg_to_user usage)
-- High-level workflow guidance
+CRITERIA FOR STRATEGIES:
+- Must be applicable to ANY task type (not specific to e-commerce, forms, dropdowns, etc.)
+- Must NOT reference specific page states, element types, task contexts, or scenarios
+- Must be fundamental behavioral rules (not "when X happens, do Y")
+- Should be 5-10 core principles maximum
+- Must NOT contain contextual phrases like "when working with", "for [specific]", "on [site]", "when encountering [specific]"
+
+VALID STRATEGY EXAMPLES:
+✓ "Execute only one action per turn"
+✓ "Always wait for environment response before proceeding"
+✓ "Use send_msg_to_user() to communicate results to the user"
+✓ "After an error, try a different approach rather than repeating"
+
+INVALID (These should be MEMORIES, not strategies):
+✗ "When working with dropdowns, use click()..." (contextual - mentions specific element type)
+✗ "For e-commerce sites, follow pattern X..." (contextual - mentions specific site type)
+✗ "When on page Y, do Z..." (contextual - mentions specific page state)
+✗ "For product search tasks..." (contextual - mentions specific task type)
+✗ "When encountering element-not-found errors..." (contextual - mentions specific error type)
+
+Generate AT MOST 2-3 new strategies per reflection session. Only add if it's truly universal and non-contextual. If unsure, make it a MEMORY instead.
 
 Return your analysis as a JSON object with two arrays:
 {
@@ -602,13 +615,22 @@ Return your analysis as a JSON object with two arrays:
                 prompt += "\n"
         
         prompt += """
-Analyze these patterns and generate 3-8 high-quality memory insights. Focus on:
+Analyze these patterns and generate:
+- 3-8 high-quality MEMORY insights (contextual, specific situations)
+- 0-3 STRATEGY insights (only if truly universal and non-contextual)
+
+For MEMORIES, focus on:
 1. Common failure modes with specific error messages
 2. Successful action sequences that worked
 3. Specific page states or contexts where mistakes occurred
 4. Actionable guidance based on real examples
 
-Return ONLY a valid JSON array, no other text.
+For STRATEGIES, only include if:
+- It applies to ALL tasks universally
+- It contains NO contextual references
+- It's a fundamental behavioral rule
+
+Return ONLY a valid JSON object with "memories" and "strategies" arrays, no other text.
 """
         
         return prompt
