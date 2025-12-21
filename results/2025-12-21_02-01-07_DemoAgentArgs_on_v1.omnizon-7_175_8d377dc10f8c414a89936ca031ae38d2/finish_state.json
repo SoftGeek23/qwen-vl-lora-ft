@@ -1,0 +1,15 @@
+{
+    "env_state": {
+        "orderDetailsDiff": {
+            "added": {},
+            "deleted": {},
+            "updated": {}
+        },
+        "cartDetailsDiff": {
+            "added": {},
+            "deleted": {},
+            "updated": {}
+        }
+    },
+    "local_reward": 0.0
+}
