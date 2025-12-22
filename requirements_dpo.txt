@@ -1,0 +1,25 @@
+# Requirements for DPO fine-tuning Gemma 3 with Unsloth
+# Install with: pip install -r requirements_dpo.txt
+
+# Core dependencies
+torch>=2.0.0
+transformers>=4.37.0
+datasets>=2.14.0
+accelerate>=0.24.0
+
+# Unsloth for optimized Gemma 3 training
+# Install from: https://github.com/unslothai/unsloth
+# For Colab: pip install "unsloth[colab-new] @ git+https://github.com/unslothai/unsloth.git"
+# For local: pip install "unsloth @ git+https://github.com/unslothai/unsloth.git"
+unsloth @ git+https://github.com/unslothai/unsloth.git
+
+# TRL for DPO training
+trl>=0.7.0
+
+# Hugging Face Hub
+huggingface_hub>=0.20.0
+
+# Optional: for better performance
+bitsandbytes>=0.41.0  # For 4-bit quantization
+peft>=0.6.0  # Usually included with unsloth
+
