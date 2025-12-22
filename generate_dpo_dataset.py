@@ -115,10 +115,20 @@ def main():
     # Collect task logs
     task_logs = reflector.collect_task_logs(results, results_dir=results_dir)
     
-    # Reflect on failures
-    failure_reflections = reflector.reflect_on_failures(task_logs)
+    # Create failure reflections from failed task logs
+    # Format: List of dicts with task_name, error, reflection, exp_dir
+    failure_reflections = []
+    for task_log in task_logs:
+        if not task_log.success:
+            failure_reflection = {
+                "task_name": task_log.task_name,
+                "error": task_log.error or "Task did not pass evaluation criteria",
+                "reflection": f"Task failed: {task_log.error or 'Unknown error'}",
+                "exp_dir": task_log.exp_dir,
+            }
+            failure_reflections.append(failure_reflection)
     
-    print(f"   Generated {len(failure_reflections)} failure reflections")
+    print(f"   Found {len(failure_reflections)} failed tasks to generate DPO examples from")
     
     if not failure_reflections:
         print("   ⚠️  No failures to reflect on. Using direct generation method.")
