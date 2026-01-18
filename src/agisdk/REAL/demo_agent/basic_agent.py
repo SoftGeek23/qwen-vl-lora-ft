@@ -694,6 +694,16 @@ class DemoAgent(Agent):
                 action_loop_detected = True
                 logger.warning(f"Action loop detected: repeating {recent_actions[0]}")
         
+        # Extract task goal for memory retrieval
+        task_goal = None
+        if self.use_memory and obs.get("goal_object"):
+            goal_obj = obs.get("goal_object")
+            if isinstance(goal_obj, list) and len(goal_obj) > 0:
+                if isinstance(goal_obj[0], dict) and "text" in goal_obj[0]:
+                    task_goal = goal_obj[0]["text"]
+            elif isinstance(goal_obj, str):
+                task_goal = goal_obj
+        
         # Proactive memory injection based on current state (always inject top-k similar memories)
         if self.use_memory and self.memory_index and state_summary:
             # Get similar memories based on current state (proactive)
@@ -702,6 +712,7 @@ class DemoAgent(Agent):
                 current_action_context=None,
                 current_error=None,
                 task_type=task_type,
+                task_goal=task_goal,
             )
             
             if proactive_memories:
@@ -719,6 +730,7 @@ class DemoAgent(Agent):
                     current_action_context=None,
                     current_error=obs["last_action_error"],
                     task_type=task_type,
+                    task_goal=task_goal,
                 )
                 if error_memories:
                     user_msgs.append({

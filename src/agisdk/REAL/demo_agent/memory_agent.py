@@ -172,11 +172,21 @@ and executed by a program, make sure to follow the formatting instructions.
         if self.use_memory and self.memory_index:
             task_type = self._get_task_type_from_obs(obs)
             current_error = obs.get("last_action_error")
+            # Extract task goal for memory retrieval
+            task_goal = None
+            if obs.get("goal_object"):
+                goal_obj = obs.get("goal_object")
+                if isinstance(goal_obj, list) and len(goal_obj) > 0:
+                    if isinstance(goal_obj[0], dict) and "text" in goal_obj[0]:
+                        task_goal = goal_obj[0]["text"]
+                elif isinstance(goal_obj, str):
+                    task_goal = goal_obj
             memory_text = self.memory_index.get_memories_for_prompt(
                 current_state_summary=state_summary,
                 current_action_context=action_context,
                 current_error=current_error,
                 task_type=task_type,
+                task_goal=task_goal,
             )
             if memory_text:
                 user_msgs.append({

@@ -23,3 +23,6 @@ huggingface_hub>=0.20.0
 bitsandbytes>=0.41.0  # For 4-bit quantization
 peft>=0.6.0  # Usually included with unsloth
 
+
+
+

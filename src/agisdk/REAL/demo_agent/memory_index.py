@@ -199,6 +199,7 @@ class MemoryIndex:
         current_action_context: Optional[str] = None,
         current_error: Optional[str] = None,
         task_type: Optional[str] = None,
+        task_goal: Optional[str] = None,
         top_k: Optional[int] = None,
     ) -> List[MemoryExemplar]:
         """
@@ -207,7 +208,9 @@ class MemoryIndex:
         Args:
             current_state_summary: Summary of current page state
             current_action_context: Context about what action we're considering
+            current_error: Error message if any
             task_type: Filter by task type if provided
+            task_goal: Task goal text (for better semantic matching)
             top_k: Number of memories to retrieve (overrides default)
         
         Returns:
@@ -229,6 +232,16 @@ class MemoryIndex:
         if self.use_embeddings and self.embedder:
             # Build query with error context if present
             query_parts = [current_state_summary]
+            
+            # Include task goal prominently - it contains important keywords like "display", "show", "find"
+            if task_goal:
+                # Extract key action verbs from goal (display, show, find, report, etc.)
+                goal_lower = task_goal.lower()
+                if any(keyword in goal_lower for keyword in ["display", "show", "find", "report", "tell", "communicate"]):
+                    query_parts.append(f"Task goal: {task_goal}")
+                else:
+                    query_parts.append(task_goal)
+            
             if current_action_context:
                 query_parts.append(current_action_context)
             if current_error:
@@ -274,6 +287,7 @@ class MemoryIndex:
         current_action_context: Optional[str] = None,
         current_error: Optional[str] = None,
         task_type: Optional[str] = None,
+        task_goal: Optional[str] = None,
     ) -> str:
         """
         Get formatted memories for inclusion in LLM prompt.
@@ -285,6 +299,7 @@ class MemoryIndex:
             current_action_context,
             current_error,
             task_type,
+            task_goal,
         )
         
         if not memories:
